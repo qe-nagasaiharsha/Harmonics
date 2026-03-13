@@ -229,6 +229,7 @@ def _attempt_to_dict(a) -> dict:
         "step_reached": a.step_reached,
         "rejected_at": a.rejected_at,
         "succeeded": a.succeeded,
+        "partial_wave": a.partial_wave,
         "steps": [
             {
                 "step": s.step,
@@ -427,7 +428,7 @@ async def detect(req: DetectRequest):
 
     try:
         detector = PatternDetector(data)
-        results, traces = detector.find_all(cfg, collect_traces=True)
+        results, traces, detection_log = detector.find_all(cfg, collect_traces=True)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Detection error: {traceback.format_exc()}")
 
@@ -468,6 +469,7 @@ async def detect(req: DetectRequest):
         "candles": candles_out,
         "patterns": [_result_to_dict(r) for r in results],
         "candle_logs": candle_logs_out,
+        "detection_log": detection_log or [],
     }
 
 
@@ -482,10 +484,10 @@ def main():
     local_ip = socket.gethostbyname(hostname)
     print(f"\n{'='*50}")
     print(f"  Harmonics Dashboard")
-    print(f"  Local:   http://localhost:8000")
-    print(f"  Network: http://{local_ip}:8000")
+    print(f"  Local:   http://localhost:8001")
+    print(f"  Network: http://{local_ip}:8001")
     print(f"{'='*50}\n")
-    uvicorn.run("python_implementation.api.server:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("python_implementation.api.server:app", host="0.0.0.0", port=8001, reload=False)
 
 
 if __name__ == "__main__":

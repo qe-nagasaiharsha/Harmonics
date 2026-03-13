@@ -29,6 +29,20 @@ from .filters import tick_speed_filter, divergence_filter
 PriceFn = Callable[[int], float]
 
 
+def _snapshot_wave(wave: Wave) -> dict:
+    """Capture current wave state as a plain dict for partial-pattern rendering."""
+    d: dict = {}
+    for label in ('p', 'x', 'a', 'b', 'c', 'd', 'e', 'f'):
+        idx = getattr(wave, f'{label}_idx', 0)
+        price = getattr(wave, f'{label}_price', 0.0)
+        if idx > 0 or (label == 'x' and price != 0.0):
+            d[f'{label}_idx'] = idx
+            d[f'{label}_price'] = price
+    d['x_less_than_a'] = wave.x_less_than_a
+    d['is_bullish'] = wave.is_bullish
+    return d
+
+
 class PatternDetector:
     """Stateless pattern detector operating on vectorised candle data.
 
@@ -73,18 +87,20 @@ class PatternDetector:
         self,
         cfg: DetectorConfig,
         collect_traces: bool = False,
-    ) -> List[PatternResult] | Tuple[List[PatternResult], Dict[int, List[XAttemptLog]]]:
+    ) -> List[PatternResult] | Tuple[List[PatternResult], Dict[int, List[XAttemptLog]], list]:
         """Find all patterns matching *cfg* in the loaded candle data.
 
         Args:
             cfg: Detection configuration.
             collect_traces: When True, also returns a dict mapping each
-                x_idx to the list of ``XAttemptLog`` entries produced.
-                Return type becomes ``(results, traces)``.
+                x_idx to the list of ``XAttemptLog`` entries produced,
+                plus a flat sequential detection log.
+                Return type becomes ``(results, traces, detection_log)``.
 
         Returns:
-            List of ``PatternResult`` objects, OR a ``(results, traces)``
-            tuple when ``collect_traces=True``.
+            List of ``PatternResult`` objects, OR a
+            ``(results, traces, detection_log)`` tuple when
+            ``collect_traces=True``.
         """
         search_start = self._total_bars
         if cfg.max_search_bars > 0 and cfg.max_search_bars < self._total_bars:
@@ -92,34 +108,65 @@ class PatternDetector:
 
         results: List[PatternResult] = []
         traces: Dict[int, List[XAttemptLog]] = {} if collect_traces else None  # type: ignore
+        detection_log: list = [] if collect_traces else None  # type: ignore
 
         for active_ct in cfg.channel_types_to_run():
+            if collect_traces:
+                detection_log.append({
+                    'type': 'channel',
+                    'channel': active_ct.value,
+                })
+
             last_drawn_idx = -9999
 
             for x_idx in range(search_start, cfg.b_max + 10, -1):
                 # Try X as LOW
-                pat, attempt = self._try_from_x(
+                pat, attempts = self._try_from_x(
                     x_idx, True, active_ct, cfg, last_drawn_idx, collect_traces
                 )
-                if collect_traces and attempt:
-                    traces.setdefault(x_idx, []).append(attempt)
+                if collect_traces and attempts:
+                    traces.setdefault(x_idx, []).extend(attempts)
+                    self._log_attempts(detection_log, attempts, active_ct.value)
                 if pat is not None:
                     results.append(pat)
                     last_drawn_idx = pat.wave.last_point(pat.pattern_type)[0]
 
                 # Try X as HIGH
-                pat, attempt = self._try_from_x(
+                pat, attempts = self._try_from_x(
                     x_idx, False, active_ct, cfg, last_drawn_idx, collect_traces
                 )
-                if collect_traces and attempt:
-                    traces.setdefault(x_idx, []).append(attempt)
+                if collect_traces and attempts:
+                    traces.setdefault(x_idx, []).extend(attempts)
+                    self._log_attempts(detection_log, attempts, active_ct.value)
                 if pat is not None:
                     results.append(pat)
                     last_drawn_idx = pat.wave.last_point(pat.pattern_type)[0]
 
         if collect_traces:
-            return results, traces
+            return results, traces, detection_log
         return results
+
+    @staticmethod
+    def _log_attempts(log: list, attempts: list, channel: str) -> None:
+        """Append attempt entries to the flat detection log."""
+        for a in attempts:
+            log.append({
+                'type': 'attempt',
+                'channel': channel,
+                'x_idx': a.x_idx,
+                'x_is_low': a.x_is_low,
+                'b_idx': a.b_idx,
+                'b_price': a.b_price,
+                'succeeded': a.succeeded,
+                'rejected_at': a.rejected_at,
+                'step_reached': a.step_reached,
+                'steps': [{
+                    'step': s.step, 'passed': s.passed,
+                    'detail': s.detail, 'value': s.value,
+                    'threshold_min': s.threshold_min,
+                    'threshold_max': s.threshold_max,
+                } for s in a.steps],
+            })
 
     # ===================================================================
     # Internal: cascade
@@ -133,15 +180,16 @@ class PatternDetector:
         cfg: DetectorConfig,
         last_drawn_idx: int,
         collect_traces: bool,
-    ) -> Tuple[Optional[PatternResult], Optional[XAttemptLog]]:
+    ) -> Tuple[Optional[PatternResult], list]:
         """Try to build a pattern starting from X at *x_idx*.
 
-        Returns ``(PatternResult | None, XAttemptLog | None)``.
-        XAttemptLog is only populated when collect_traces=True.
+        Returns ``(PatternResult | None, list_of_XAttemptLog)``.
+        The list is populated only when collect_traces=True; otherwise
+        it is empty.
         """
         x_price = self._low(x_idx) if x_is_low else self._high(x_idx)
         if x_price == 0:
-            return None, None
+            return None, []
 
         # -- B candidate search --
         b_cands = self._collect_b_candidates(x_idx, x_price, x_is_low, cfg)
@@ -153,13 +201,18 @@ class PatternDetector:
                 "B_SEARCH",
                 f"No B candidates found in range [{x_idx - cfg.b_max}, {x_idx - cfg.b_min - 1}]",
             )
-            return None, attempt
+            # Minimal partial_wave with just X point
+            attempt.partial_wave = {
+                'x_idx': x_idx, 'x_price': x_price,
+                'x_less_than_a': False, 'is_bullish': False,
+            }
+            return None, [attempt]
 
         if not b_cands:
-            return None, None
+            return None, []
 
-        # Try each B candidate in order — return on first success
-        last_attempt: Optional[XAttemptLog] = None
+        # Try each B candidate — collect ALL attempts for tracing
+        all_attempts: list = []
         for b_idx, b_price in b_cands:
             bars_x_b = x_idx - b_idx
             if bars_x_b <= 0:
@@ -168,13 +221,12 @@ class PatternDetector:
                 x_idx, x_price, x_is_low, b_idx, b_price, bars_x_b,
                 channel_type, cfg, last_drawn_idx, collect_traces,
             )
-            if collect_traces:
-                last_attempt = attempt
+            if collect_traces and attempt:
+                all_attempts.append(attempt)
             if result is not None:
-                return result, attempt
+                return result, all_attempts
 
-        # Return the last attempt (most informative) when collect_traces
-        return None, last_attempt
+        return None, all_attempts
 
     def _collect_b_candidates(
         self,
@@ -274,6 +326,7 @@ class PatternDetector:
                     f"No valid A point (max_dev={max_dev:.5f} ≤ 0 or no candidate)",
                     value=max_dev,
                 )
+                attempt.partial_wave = _snapshot_wave(wave)
             return None, attempt
 
         if a_idx >= x_idx or a_idx <= b_idx:
@@ -283,6 +336,7 @@ class PatternDetector:
                     f"A at bar {a_idx} outside X({x_idx})..B({b_idx}) range",
                     value=float(a_idx),
                 )
+                attempt.partial_wave = _snapshot_wave(wave)
             return None, attempt
 
         if attempt:
@@ -301,6 +355,7 @@ class PatternDetector:
         if abs(xa_diff) < 1e-10:
             if attempt:
                 attempt.reject("XB_RETRACE", "XA diff near zero — degenerate pattern")
+                attempt.partial_wave = _snapshot_wave(wave)
             return None, attempt
 
         xb_retrace = (b_price - x_price) / xa_diff * 100
@@ -313,6 +368,7 @@ class PatternDetector:
                     threshold_min=cfg.x_to_a_b_min,
                     threshold_max=cfg.x_to_a_b_max,
                 )
+                attempt.partial_wave = _snapshot_wave(wave)
             return None, attempt
 
         if attempt:
@@ -329,6 +385,7 @@ class PatternDetector:
         if a_offset < 0 or a_offset >= len(xb_array):
             if attempt:
                 attempt.reject("A_WIDTH", f"A offset {a_offset} out of XB array bounds")
+                attempt.partial_wave = _snapshot_wave(wave)
             return None, attempt
 
         z = xb_array[a_offset]
@@ -356,6 +413,7 @@ class PatternDetector:
                     threshold_min=min(a_lower, a_upper),
                     threshold_max=max(a_lower, a_upper),
                 )
+                attempt.partial_wave = _snapshot_wave(wave)
             return None, attempt
 
         if attempt:
@@ -391,6 +449,7 @@ class PatternDetector:
                             f"Secondary A retrace={new_retrace:.2f}% outside range after scan",
                             value=new_retrace,
                         )
+                        attempt.partial_wave = _snapshot_wave(wave)
                     return None, attempt
 
         if attempt:
@@ -408,6 +467,7 @@ class PatternDetector:
                 first_fail = next((r for r in diag.failures), None)
                 detail = first_fail.details if first_fail else "XB segment check failed"
                 attempt.reject("XB_SEGMENT", f"XB strict check failed: {detail}")
+                attempt.partial_wave = _snapshot_wave(wave)
             return None, attempt
 
         if attempt:
@@ -424,6 +484,7 @@ class PatternDetector:
                 first_fail = next((r for r in diag.failures), None)
                 detail = first_fail.details if first_fail else "span containment failed"
                 attempt.reject("XB_SPAN", f"X→B span containment failed: {detail}")
+                attempt.partial_wave = _snapshot_wave(wave)
             return None, attempt
 
         if attempt:
@@ -437,6 +498,7 @@ class PatternDetector:
                     "P_POINT",
                     f"Not enough bars before X for P (need {bars_p_x}, have {self._total_bars - x_idx})",
                 )
+                attempt.partial_wave = _snapshot_wave(wave)
             return None, attempt
 
         wave.p_idx = x_idx + bars_p_x
@@ -450,6 +512,7 @@ class PatternDetector:
                 first_fail = next((r for r in diag.failures if r.segment == "P→X"), None)
                 detail = first_fail.details if first_fail else "PX segment failed"
                 attempt.reject("PX_SEGMENT", f"P→X segment check failed: {detail}")
+                attempt.partial_wave = _snapshot_wave(wave)
             return None, attempt
 
         if attempt:
@@ -475,6 +538,7 @@ class PatternDetector:
         if not c_cands:
             if attempt:
                 attempt.reject("C_SEARCH", "No valid C candidates found")
+                attempt.partial_wave = _snapshot_wave(wave)
             return None, attempt
 
         if attempt:
@@ -557,6 +621,7 @@ class PatternDetector:
                     "CASCADE",
                     f"All C/D/E/F candidate combinations tried — no valid pattern found",
                 )
+            attempt.partial_wave = _snapshot_wave(wave)
 
         return None, attempt
 
@@ -581,6 +646,7 @@ class PatternDetector:
         if not tick_speed_filter(wave.x_idx, last_idx, cfg.tick_min_speed, self._time):
             if attempt:
                 attempt.reject("TICK_SPEED", "Tick speed filter rejected pattern")
+                attempt.partial_wave = _snapshot_wave(wave)
             return None
 
         # Divergence filter
@@ -599,16 +665,19 @@ class PatternDetector:
         ):
             if attempt:
                 attempt.reject("DIVERGENCE", f"Divergence filter ({cfg.divergence_type.value}) rejected pattern")
+                attempt.partial_wave = _snapshot_wave(wave)
             return None
 
         # Pattern direction filter
         if cfg.pattern_direction == PatternDirection.BULLISH and not wave.is_bullish:
             if attempt:
                 attempt.reject("DIRECTION", "Pattern is bearish but filter requires bullish")
+                attempt.partial_wave = _snapshot_wave(wave)
             return None
         if cfg.pattern_direction == PatternDirection.BEARISH and wave.is_bullish:
             if attempt:
                 attempt.reject("DIRECTION", "Pattern is bullish but filter requires bearish")
+                attempt.partial_wave = _snapshot_wave(wave)
             return None
 
         # Overlap filter
@@ -619,6 +688,7 @@ class PatternDetector:
                         "OVERLAP",
                         f"Too close to previous pattern (gap={last_drawn_idx - last_idx} < min={cfg.min_bars_between_patterns})",
                     )
+                    attempt.partial_wave = _snapshot_wave(wave)
                 return None
 
         # Success
@@ -627,6 +697,7 @@ class PatternDetector:
             attempt.succeed(
                 f"{ptype.name} {direction_str} pattern confirmed via {channel_type.value} channel"
             )
+            attempt.partial_wave = _snapshot_wave(wave)
 
         return PatternResult(
             wave=copy.deepcopy(wave),

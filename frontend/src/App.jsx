@@ -3,6 +3,7 @@ import axios from 'axios'
 import ConfigPanel from './components/ConfigPanel'
 import ChartContainer from './components/ChartContainer'
 import LogPanel from './components/LogPanel'
+import ContextMenu from './components/ContextMenu'
 
 const DEFAULT_CFG = {
   // Pattern type
@@ -76,9 +77,12 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const [status, setStatus] = useState({ type: 'idle', text: 'Upload a data file and click Detect' })
   const [detectionResult, setDetectionResult] = useState(null)
-  const [hoveredBar, setHoveredBar] = useState(null)
   const [pinnedBar, setPinnedBar] = useState(null)
   const [selectedPattern, setSelectedPattern] = useState(null)
+
+  // ---- Isolation mode (right-click → X>B / X<B) ----
+  const [isolationMode, setIsolationMode] = useState(null)   // { xIdx, xIsLow } | null
+  const [contextMenu, setContextMenu] = useState(null)        // { x, y, barIdx } | null
 
   // Load defaults from backend
   useEffect(() => {
@@ -129,9 +133,9 @@ export default function App() {
     }
     setLoading(true)
     setDetectionResult(null)
-    setHoveredBar(null)
     setPinnedBar(null)
     setSelectedPattern(null)
+    setIsolationMode(null)
     setStatus({ type: 'running', text: 'Running detection…' })
     const t0 = performance.now()
     try {
@@ -158,14 +162,28 @@ export default function App() {
     setPinnedBar(prev => (prev && prev.idx === bar.idx) ? null : bar)
   }, [])
 
-  const handleUnpin = useCallback(() => setPinnedBar(null), [])
+  // Right-click context menu handlers
+  const handleContextMenu = useCallback((info) => {
+    setContextMenu(info)  // { x, y, barIdx }
+  }, [])
 
-  const activeBar = pinnedBar ?? hoveredBar
+  const handleSelectCase = useCallback((xIsLow) => {
+    if (!contextMenu) return
+    setIsolationMode({ xIdx: contextMenu.barIdx, xIsLow })
+    setContextMenu(null)
+    // Also pin this bar so the LogPanel shows its traces
+    const candles = detectionResult?.candles
+    if (candles) {
+      const c = candles.find(c => c.idx === contextMenu.barIdx)
+      if (c) setPinnedBar({ idx: c.idx, time: Math.floor(c.time), open: c.open, high: c.high, low: c.low, close: c.close })
+    }
+  }, [contextMenu, detectionResult])
+
+  const handleExitIsolation = useCallback(() => setIsolationMode(null), [])
+
   const candle_logs = detectionResult?.candle_logs ?? {}
-  const activeLogs = activeBar ? (candle_logs[String(activeBar.idx)] ?? []) : []
 
-  // Client-side direction filter — applied on top of (or in lieu of) backend filter
-  // so changing the Direction dropdown updates the chart immediately without re-detecting.
+  // Client-side direction filter
   const displayedResult = useMemo(() => {
     if (!detectionResult) return null
     const dir = config.pattern_direction
@@ -176,15 +194,18 @@ export default function App() {
     return { ...detectionResult, patterns, patterns_found: patterns.length }
   }, [detectionResult, config.pattern_direction])
 
-  const matchedPattern = displayedResult?.patterns.find(p =>
-    activeBar && p.wave.x_idx === activeBar.idx
-  ) ?? null
+  // Compute isolated attempt logs for the chart to draw partial patterns
+  const isolatedAttempts = useMemo(() => {
+    if (!isolationMode || !detectionResult) return []
+    const logs = candle_logs[String(isolationMode.xIdx)] ?? []
+    return logs.filter(a => a.x_is_low === isolationMode.xIsLow)
+  }, [isolationMode, detectionResult, candle_logs])
 
   return (
     <div className="app-shell">
       {/* ---- Header ---- */}
       <header className="app-header">
-        <div className="app-logo">◈ <span>Harmonics</span></div>
+        <div className="app-logo">&#x25C8; <span>Harmonics</span></div>
         <div className="header-divider" />
         <div className="status-bar">
           {status.type === 'running' && (
@@ -193,9 +214,9 @@ export default function App() {
           {status.type === 'ok' && (
             <span>
               <span className="highlight">{status.patterns} patterns</span>
-              {' '}({status.bull}↑ {status.bear}↓) in{' '}
+              {' '}({status.bull}&#x2191; {status.bear}&#x2193;) in{' '}
               <span className="highlight">{status.bars} bars</span>
-              {' — '}{status.text.split('—')[1]}
+              {' \u2014 '}{status.text.split('\u2014')[1]}
             </span>
           )}
           {status.type === 'error' && <span className="error">{status.text}</span>}
@@ -203,7 +224,7 @@ export default function App() {
         </div>
         <div className="header-actions">
           <div style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-            API: <span style={{ color: 'var(--accent-cyan)' }}>:8000</span>
+            API: <span style={{ color: 'var(--accent-cyan)' }}>:8001</span>
           </div>
         </div>
       </header>
@@ -225,17 +246,29 @@ export default function App() {
           config={config}
           selectedPattern={selectedPattern}
           pinnedBar={pinnedBar}
-          onHover={setHoveredBar}
+          isolationMode={isolationMode}
+          isolatedAttempts={isolatedAttempts}
+          candleLogs={candle_logs}
+          onHover={() => {}}
           onBarClick={handleBarClick}
+          onContextMenu={handleContextMenu}
+          onExitIsolation={handleExitIsolation}
         />
         <LogPanel
-          activeBar={activeBar}
-          logs={activeLogs}
-          matchedPattern={matchedPattern}
-          isPinned={!!pinnedBar}
-          onUnpin={handleUnpin}
+          detectionLog={detectionResult?.detection_log ?? []}
         />
       </div>
+
+      {/* ---- Right-click context menu ---- */}
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          barIdx={contextMenu.barIdx}
+          onSelectCase={handleSelectCase}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
     </div>
   )
 }

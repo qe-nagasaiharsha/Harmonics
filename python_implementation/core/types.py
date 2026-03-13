@@ -239,6 +239,9 @@ class XAttemptLog:
     rejected_at: str = ""            # "" when pattern succeeded
     succeeded: bool = False
     steps: List[StepLog] = field(default_factory=list)
+    # Partial wave snapshot — captures whatever points were found before
+    # rejection so the UI can draw incomplete pattern traces on the chart.
+    partial_wave: Optional[dict] = None
 
     def add_step(self, step: str, passed: bool, detail: str,
                  value: float = 0.0,

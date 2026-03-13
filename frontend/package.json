@@ -8,6 +8,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@tanstack/react-virtual": "^3.13.22",
     "axios": "^1.13.5",
     "lightweight-charts": "^4.2.3",
     "react": "^18.3.0",
