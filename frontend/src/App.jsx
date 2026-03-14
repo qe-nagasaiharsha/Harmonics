@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import axios from 'axios'
 import ConfigPanel from './components/ConfigPanel'
 import ChartContainer from './components/ChartContainer'
@@ -80,6 +80,9 @@ export default function App() {
   const [pinnedBar, setPinnedBar] = useState(null)
   const [selectedPattern, setSelectedPattern] = useState(null)
 
+  const [hoveredBarIdx, setHoveredBarIdx] = useState(null)
+  const hoverRafRef = useRef(null)
+
   // ---- Isolation mode (right-click → X>B / X<B) ----
   const [isolationMode, setIsolationMode] = useState(null)   // { xIdx, xIsLow } | null
   const [contextMenu, setContextMenu] = useState(null)        // { x, y, barIdx } | null
@@ -139,7 +142,7 @@ export default function App() {
     setStatus({ type: 'running', text: 'Running detection…' })
     const t0 = performance.now()
     try {
-      const resp = await axios.post('/api/detect', { data_path: dataPath, max_bars: maxBars, config })
+      const resp = await axios.post('/api/detect', { data_path: dataPath, max_bars: maxBars, config }, { timeout: 300000 })
       const dt = ((performance.now() - t0) / 1000).toFixed(1)
       const d = resp.data
       setDetectionResult(d)
@@ -157,6 +160,13 @@ export default function App() {
       setLoading(false)
     }
   }, [dataPath, maxBars, config])
+
+  const handleHover = useCallback((info) => {
+    if (hoverRafRef.current) cancelAnimationFrame(hoverRafRef.current)
+    hoverRafRef.current = requestAnimationFrame(() => {
+      setHoveredBarIdx(info?.idx ?? null)
+    })
+  }, [])
 
   const handleBarClick = useCallback((bar) => {
     setPinnedBar(prev => (prev && prev.idx === bar.idx) ? null : bar)
@@ -249,13 +259,17 @@ export default function App() {
           isolationMode={isolationMode}
           isolatedAttempts={isolatedAttempts}
           candleLogs={candle_logs}
-          onHover={() => {}}
+          onHover={handleHover}
           onBarClick={handleBarClick}
           onContextMenu={handleContextMenu}
           onExitIsolation={handleExitIsolation}
         />
         <LogPanel
           detectionLog={detectionResult?.detection_log ?? []}
+          hoveredBarIdx={hoveredBarIdx}
+          pinnedBar={pinnedBar}
+          isolationMode={isolationMode}
+          candleLogs={candle_logs}
         />
       </div>
 

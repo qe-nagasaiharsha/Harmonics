@@ -12,7 +12,8 @@
       "Bash(powershell.exe -Command \"\\(Get-WmiObject Win32_Process -Filter ''ProcessId=24916''\\).CommandLine\")",
       "Bash(node_modules/.bin/vite build:*)",
       "Bash(where node:*)",
-      "Bash(where npm:*)"
+      "Bash(where npm:*)",
+      "mcp__Claude_Preview__preview_start"
     ]
   }
 }

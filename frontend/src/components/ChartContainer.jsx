@@ -304,10 +304,8 @@ export default function ChartContainer({
     const onBarClickRef   = useRef(onBarClick)
     const onContextMenuRef = useRef(onContextMenu)
     const crosshairBoxRef = useRef(null)
-    const overlayRef      = useRef(null)
     const isMountedRef    = useRef(false)
     const [chartError, setChartError] = useState(null)
-    const [overlayBar, setOverlayBar] = useState(null)
 
     onHoverRef.current     = onHover
     onBarClickRef.current  = onBarClick
@@ -350,7 +348,10 @@ export default function ChartContainer({
 
             // Crosshair hover
             chart.subscribeCrosshairMove(param => {
-                if (!param || !param.time) return
+                if (!param || !param.time) {
+                    onHoverRef.current({ idx: null, time: null })
+                    return
+                }
                 const candles = rawCandlesRef.current
                 if (!candles) return
                 const ohlcv = param.seriesData ? param.seriesData.get(cs) : null
@@ -370,15 +371,13 @@ export default function ChartContainer({
                 }
             })
 
-            // Left-click → pin bar + show log overlay (NOT context menu)
+            // Left-click → pin bar (logs shown in right panel)
             container.addEventListener('click', (e) => {
-                // Ignore right-click bubbled as click
                 if (e.button !== 0) return
                 const found = findCandleAtX(e.clientX)
                 if (found) {
                     const ohlcv = { open: found.open, high: found.high, low: found.low, close: found.close }
                     onBarClickRef.current({ idx: found.idx, time: Math.floor(found.time), ...ohlcv })
-                    setOverlayBar({ idx: found.idx, time: Math.floor(found.time), ...ohlcv })
                 }
             })
 
@@ -609,54 +608,6 @@ export default function ChartContainer({
         })
     }, [selectedPattern, data, isolationMode])
 
-    // ---- Position on-chart log overlay ----
-    useEffect(() => {
-        const ov = overlayRef.current
-        if (!ov || !overlayBar || !chartRef.current || !candleSeriesRef.current) {
-            if (ov) ov.style.display = 'none'
-            return
-        }
-
-        const logs = candleLogs?.[String(overlayBar.idx)] ?? []
-        if (!logs.length) { ov.style.display = 'none'; return }
-
-        // Build HTML content
-        ov.innerHTML = buildOverlayHTML(overlayBar.idx, logs, !!pinnedBar)
-
-        // Position overlay next to the candle
-        const ts = chartRef.current.timeScale()
-        const xCoord = ts.timeToCoordinate(overlayBar.time)
-        if (xCoord === null) { ov.style.display = 'none'; return }
-
-        const midPrice = (overlayBar.high + overlayBar.low) / 2
-        const yCoord = candleSeriesRef.current.priceToCoordinate(midPrice)
-        if (yCoord === null) { ov.style.display = 'none'; return }
-
-        ov.style.display = 'block'
-        const containerRect = containerRef.current.getBoundingClientRect()
-        const ovWidth = Math.min(320, containerRect.width * 0.35)
-        ov.style.maxWidth = `${ovWidth}px`
-
-        // Place to the right of candle, or left if near right edge
-        let left = xCoord + 16
-        if (left + ovWidth > containerRect.width) left = xCoord - ovWidth - 16
-        left = Math.max(4, Math.min(left, containerRect.width - ovWidth - 4))
-
-        let top = yCoord - 40
-        top = Math.max(4, Math.min(top, containerRect.height - 200))
-
-        ov.style.left = `${left}px`
-        ov.style.top = `${top}px`
-    }, [overlayBar, candleLogs, pinnedBar])
-
-    // Hide overlay when unpinning or no bar
-    useEffect(() => {
-        if (!pinnedBar && overlayRef.current) {
-            overlayRef.current.style.display = 'none'
-            setOverlayBar(null)
-        }
-    }, [pinnedBar])
-
     const isEmpty = !data?.candles?.length
 
     return (
@@ -708,8 +659,6 @@ export default function ChartContainer({
                     </div>
                 )}
                 <div ref={crosshairBoxRef} className="crosshair-info" style={{ display: isEmpty ? 'none' : undefined }} />
-                {/* On-chart log overlay */}
-                <div ref={overlayRef} className="chart-log-overlay" style={{ display: 'none' }} />
             </div>
 
             {/* Stats strip */}

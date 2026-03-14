@@ -12,6 +12,7 @@ or:
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import tempfile
 import traceback
@@ -31,6 +32,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.middleware.gzip import GZipMiddleware
 
 from python_implementation.core.config import DetectorConfig
 from python_implementation.core.types import ChannelType, DivergenceType, PatternDirection, PatternType
@@ -52,6 +54,7 @@ _UPLOADS = Path(tempfile.gettempdir()) / "harmonics_uploads"
 _UPLOADS.mkdir(exist_ok=True)
 _MAX_UPLOAD_MB = 50
 
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -303,6 +306,29 @@ def _build_cfg(c: ConfigInput) -> DetectorConfig:
     )
 
 
+def _serialize_attempts(attempts, max_detailed=10):
+    """Serialize attempts, limiting full step detail to avoid payload bloat."""
+    if len(attempts) <= max_detailed:
+        return [_attempt_to_dict(a) for a in attempts]
+    result = []
+    for i, a in enumerate(attempts):
+        if i < 5 or i >= len(attempts) - 5 or a.succeeded:
+            result.append(_attempt_to_dict(a))
+        else:
+            result.append({
+                "x_idx": a.x_idx,
+                "x_is_low": a.x_is_low,
+                "b_idx": a.b_idx,
+                "b_price": a.b_price,
+                "step_reached": a.step_reached,
+                "rejected_at": a.rejected_at,
+                "succeeded": a.succeeded,
+                "partial_wave": None,
+                "steps": [],
+            })
+    return result
+
+
 def _slice_data(data: CandleArray, n: int) -> CandleArray:
     """Slice to the n most-recent bars (index 0 = most recent)."""
     import numpy as np
@@ -427,8 +453,11 @@ async def detect(req: DetectRequest):
         raise HTTPException(status_code=422, detail=f"Invalid config: {e}")
 
     try:
-        detector = PatternDetector(data)
-        results, traces, detection_log = detector.find_all(cfg, collect_traces=True)
+        def _run_detection():
+            detector = PatternDetector(data)
+            return detector.find_all(cfg, collect_traces=True)
+
+        results, traces, detection_log = await asyncio.to_thread(_run_detection)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Detection error: {traceback.format_exc()}")
 
@@ -457,10 +486,31 @@ async def detect(req: DetectRequest):
     ]
 
     # Serialise traces: Dict[int, List[XAttemptLog]] -> JSON-safe
+    # Cap at 500 logged X-candles to limit payload size
+    max_logged = 500
+    sorted_keys = sorted(traces.keys(), reverse=False)[:max_logged]
     candle_logs_out = {
-        str(x_idx): [_attempt_to_dict(a) for a in attempts]
-        for x_idx, attempts in traces.items()
+        str(x_idx): _serialize_attempts(traces[x_idx])
+        for x_idx in sorted_keys
     }
+
+    # Trim detection_log for large runs to avoid massive payloads
+    # Each entry has nested step arrays — cap to 5000 entries
+    raw_log = detection_log or []
+    if len(raw_log) > 5000:
+        # Keep channel dividers + first 2500 and last 2500 attempt entries
+        channels = [e for e in raw_log if e.get('type') == 'channel']
+        attempts = [e for e in raw_log if e.get('type') != 'channel']
+        trimmed = channels + attempts[:2500] + attempts[-2500:]
+        # Strip full step details from middle entries to reduce size further
+        for entry in trimmed:
+            if entry.get('steps') and len(entry['steps']) > 0:
+                # Keep only the failing step to save space
+                fail_step = next((s for s in entry['steps'] if not s.get('passed')), None)
+                entry['steps'] = [fail_step] if fail_step else []
+        detection_log_out = trimmed
+    else:
+        detection_log_out = raw_log
 
     return {
         "total_bars_in_file": total_bars,
@@ -469,7 +519,7 @@ async def detect(req: DetectRequest):
         "candles": candles_out,
         "patterns": [_result_to_dict(r) for r in results],
         "candle_logs": candle_logs_out,
-        "detection_log": detection_log or [],
+        "detection_log": detection_log_out,
     }
 
 
@@ -487,7 +537,7 @@ def main():
     print(f"  Local:   http://localhost:8001")
     print(f"  Network: http://{local_ip}:8001")
     print(f"{'='*50}\n")
-    uvicorn.run("python_implementation.api.server:app", host="0.0.0.0", port=8001, reload=False)
+    uvicorn.run("python_implementation.api.server:app", host="0.0.0.0", port=8001, reload=False, timeout_keep_alive=120)
 
 
 if __name__ == "__main__":
