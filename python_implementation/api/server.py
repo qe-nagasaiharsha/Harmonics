@@ -162,6 +162,22 @@ class DetectRequest(BaseModel):
     config: ConfigInput = ConfigInput()
 
 
+class TraceBarRequest(BaseModel):
+    x_idx: int
+
+
+# Threshold: collect full traces only for ≤ this many bars.
+# Above this, traces are fetched lazily via /api/trace_bar.
+_TRACE_THRESHOLD = 2000
+
+# Cache for lazy trace loading (last detection run's data + config)
+_last_run_cache: dict = {
+    "data": None,
+    "cfg": None,
+    "detector": None,
+}
+
+
 # ===================================================================
 # Serialisation helpers
 # ===================================================================
@@ -452,12 +468,26 @@ async def detect(req: DetectRequest):
     except (KeyError, ValueError) as e:
         raise HTTPException(status_code=422, detail=f"Invalid config: {e}")
 
+    # Only collect traces for small runs — large runs use lazy loading
+    should_trace = len(data) <= _TRACE_THRESHOLD
+
     try:
         def _run_detection():
             detector = PatternDetector(data)
-            return detector.find_all(cfg, collect_traces=True)
+            # Cache for lazy trace loading
+            _last_run_cache["data"] = data
+            _last_run_cache["cfg"] = cfg
+            _last_run_cache["detector"] = detector
+            if should_trace:
+                return detector.find_all(cfg, collect_traces=True)
+            else:
+                return detector.find_all(cfg, collect_traces=False), {}, []
 
-        results, traces, detection_log = await asyncio.to_thread(_run_detection)
+        raw = await asyncio.to_thread(_run_detection)
+        if should_trace:
+            results, traces, detection_log = raw
+        else:
+            results, traces, detection_log = raw
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Detection error: {traceback.format_exc()}")
 
@@ -520,6 +550,35 @@ async def detect(req: DetectRequest):
         "patterns": [_result_to_dict(r) for r in results],
         "candle_logs": candle_logs_out,
         "detection_log": detection_log_out,
+        "lazy_traces": not should_trace,  # frontend uses /api/trace_bar when True
+    }
+
+
+@app.post("/api/trace_bar")
+async def trace_bar(req: TraceBarRequest):
+    """Lazy trace loading: run detection for a single X bar with full tracing.
+
+    Used when the main detection skipped traces (> _TRACE_THRESHOLD bars).
+    Returns per-attempt logs for the specified bar so the frontend can
+    render the narrative summary on hover.
+    """
+    detector = _last_run_cache.get("detector")
+    cfg = _last_run_cache.get("cfg")
+    if detector is None or cfg is None:
+        raise HTTPException(status_code=404, detail="No detection data cached. Run detection first.")
+
+    x_idx = req.x_idx
+    if x_idx < 0 or x_idx > detector._total_bars:
+        raise HTTPException(status_code=400, detail=f"x_idx {x_idx} out of range [0, {detector._total_bars}]")
+
+    try:
+        attempts = await asyncio.to_thread(detector.trace_single_bar, x_idx, cfg)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Trace error: {e}")
+
+    return {
+        "x_idx": x_idx,
+        "attempts": [_attempt_to_dict(a) for a in attempts],
     }
 
 

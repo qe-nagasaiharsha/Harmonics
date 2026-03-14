@@ -168,7 +168,7 @@ function buildDirectionSummary(attempts) {
 // ─────────────────────────────────────────────────────────────────────────────
 // LogPanel Component
 // ─────────────────────────────────────────────────────────────────────────────
-export default function LogPanel({ detectionLog, hoveredBarIdx, isolationMode, candleLogs }) {
+export default function LogPanel({ detectionLog, hoveredBarIdx, isolationMode, candleLogs, lazyMode }) {
     const [filter, setFilter] = useState('all')
     const [searchBar, setSearchBar] = useState('')
     const [expandedRows, setExpandedRows] = useState(new Set())
@@ -391,11 +391,16 @@ export default function LogPanel({ detectionLog, hoveredBarIdx, isolationMode, c
                     )}
                 </div>
             ) : activeBarIdx != null ? (
-                /* Bar active but no attempts found */
+                /* Bar active but no attempts found — may be lazy loading */
                 <div className="narrative-summary" ref={scrollRef}>
                     <div className="log-empty" style={{ padding: '40px 20px' }}>
-                        <div className="icon" style={{ fontSize: 20 }}>&#x25CB;</div>
-                        <p>No detection attempts used this bar as X point</p>
+                        <div className="icon" style={{ fontSize: 20 }}>
+                            {lazyMode ? '\u23F3' : '\u25CB'}
+                        </div>
+                        <p>{lazyMode
+                            ? 'Loading trace for this bar…'
+                            : 'No detection attempts used this bar as X point'
+                        }</p>
                     </div>
                 </div>
             ) : (

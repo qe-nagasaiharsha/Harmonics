@@ -17,7 +17,7 @@ from typing import List, Tuple, Callable
 
 from .types import Wave
 from .config import DetectorConfig
-from .diagnostics import DiagnosticLog
+from .diagnostics import DiagnosticLog, NULL_DIAG
 from .channels import (
     compute_channel_center_a,
     compute_channel_center_xb,
@@ -111,7 +111,7 @@ def get_c_candidates(
         ac_slope = (c_price - wave.a_price) / bars_a_c
 
         # Fix 1: re-validate A→B with real AC slope
-        fix1_diag = DiagnosticLog()
+        fix1_diag = NULL_DIAG
         if not V.validate_ab_with_real_ac(
             wave.a_idx, wave.b_idx, wave.a_price, ac_slope,
             wave.x_less_than_a, cfg.slope_buffer_pct,
@@ -120,7 +120,7 @@ def get_c_candidates(
             continue
 
         # 4. Validate B→C segment
-        bc_diag = DiagnosticLog()
+        bc_diag = NULL_DIAG
         if not V.validate_bc_segment(
             wave.b_idx, i,
             wave.x_price, wave.x_idx, wave.a_price, wave.a_idx,
@@ -131,7 +131,7 @@ def get_c_candidates(
             continue
 
         # 5. A→C span containment (rule 1.14/2.14)
-        span_diag = DiagnosticLog()
+        span_diag = NULL_DIAG
         if not V.validate_span_containment(
             wave.a_idx, wave.a_price, i, c_price,
             wave.x_less_than_a,
@@ -203,7 +203,7 @@ def get_d_candidates(
         bd_slope = (d_price - wave.b_price) / bars_b_d
 
         # Fix 2: re-validate B→C with BD slope
-        fix2_diag = DiagnosticLog()
+        fix2_diag = NULL_DIAG
         if not V.validate_bc_with_bd(
             wave.b_idx, wave.c_idx, wave.b_price, bd_slope,
             wave.x_less_than_a, cfg.slope_buffer_pct,
@@ -212,7 +212,7 @@ def get_d_candidates(
             continue
 
         # 4. Validate C→D segment
-        cd_diag = DiagnosticLog()
+        cd_diag = NULL_DIAG
         if not V.validate_cd_segment(
             wave.c_idx, i,
             wave.a_price, wave.a_idx, wave.b_price, wave.b_idx,
@@ -223,7 +223,7 @@ def get_d_candidates(
             continue
 
         # 5. B→D span containment (rule 1.15/2.15)
-        span_diag = DiagnosticLog()
+        span_diag = NULL_DIAG
         if not V.validate_span_containment(
             wave.b_idx, wave.b_price, i, d_price,
             not wave.x_less_than_a,
@@ -295,7 +295,7 @@ def get_e_candidates(
         ce_slope = (e_price - wave.c_price) / bars_c_e
 
         # Fix 3: re-validate C→D with CE slope
-        fix3_diag = DiagnosticLog()
+        fix3_diag = NULL_DIAG
         if not V.validate_cd_with_ce(
             wave.c_idx, wave.d_idx, wave.c_price, ce_slope,
             wave.x_less_than_a, cfg.slope_buffer_pct,
@@ -304,7 +304,7 @@ def get_e_candidates(
             continue
 
         # 4. Validate D→E segment
-        de_diag = DiagnosticLog()
+        de_diag = NULL_DIAG
         if not V.validate_de_segment(
             wave.d_idx, i,
             wave.b_price, wave.b_idx, wave.c_price, wave.c_idx,
@@ -315,7 +315,7 @@ def get_e_candidates(
             continue
 
         # 5. C→E span containment (rule 1.16/2.16)
-        span_diag = DiagnosticLog()
+        span_diag = NULL_DIAG
         if not V.validate_span_containment(
             wave.c_idx, wave.c_price, i, e_price,
             wave.x_less_than_a,
@@ -387,7 +387,7 @@ def get_f_candidates(
         df_slope = (f_price - wave.d_price) / bars_d_f
 
         # Fix 4: re-validate D→E with DF slope
-        fix4_diag = DiagnosticLog()
+        fix4_diag = NULL_DIAG
         if not V.validate_de_with_df(
             wave.d_idx, wave.e_idx, wave.d_price, df_slope,
             wave.x_less_than_a, cfg.slope_buffer_pct,
@@ -396,7 +396,7 @@ def get_f_candidates(
             continue
 
         # 4. Validate E→F segment
-        ef_diag = DiagnosticLog()
+        ef_diag = NULL_DIAG
         if not V.validate_ef_segment(
             wave.e_idx, i,
             wave.c_price, wave.c_idx, wave.d_price, wave.d_idx,
@@ -407,7 +407,7 @@ def get_f_candidates(
             continue
 
         # 5. D→F span containment (rule 1.17/2.17)
-        span_diag = DiagnosticLog()
+        span_diag = NULL_DIAG
         if not V.validate_span_containment(
             wave.d_idx, wave.d_price, i, f_price,
             not wave.x_less_than_a,

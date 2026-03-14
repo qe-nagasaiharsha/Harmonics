@@ -163,3 +163,32 @@ class DiagnosticLog:
         n_pass = sum(1 for r in self._records if r.passed)
         n_fail = len(self._records) - n_pass
         return f"DiagnosticLog({n_pass} passed, {n_fail} failed)"
+
+
+class _NullDiag:
+    """No-op diagnostic log — eliminates recording overhead during fast search.
+
+    Validators write to the diagnostic log on every bar check. For large runs
+    (50K+ bars) this creates millions of DiagnosticRecord objects that are never
+    read.  Passing this singleton instead skips all recording while preserving
+    the same API surface the validators expect.
+    """
+    __slots__ = ()
+    def record(self, *a, **kw): pass
+    def record_pass(self, *a, **kw): pass
+    def record_fail(self, *a, **kw): pass
+    @property
+    def failures(self): return []
+    @property
+    def records(self): return []
+    @property
+    def all_passed(self): return True
+    def for_segment(self, s): return []
+    def for_bar(self, b): return []
+    def for_rule(self, r): return []
+    def snapshot(self): return []
+    def clear(self): pass
+    def __len__(self): return 0
+
+
+NULL_DIAG = _NullDiag()

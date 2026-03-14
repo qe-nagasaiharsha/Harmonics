@@ -82,6 +82,10 @@ export default function App() {
   const [hoveredBarIdx, setHoveredBarIdx] = useState(null)
   const hoverRafRef = useRef(null)
 
+  // ---- Lazy trace loading (for large runs > 2000 bars) ----
+  const [lazyTraceCache, setLazyTraceCache] = useState({})  // { [barIdx]: attempts[] }
+  const lazyFetchingRef = useRef(new Set())  // bars currently being fetched
+
   // ---- Isolation mode (right-click → X>B / X<B) ----
   const [isolationMode, setIsolationMode] = useState(null)   // { xIdx, xIsLow } | null
   const [contextMenu, setContextMenu] = useState(null)        // { x, y, barIdx } | null
@@ -137,6 +141,8 @@ export default function App() {
     setDetectionResult(null)
     setSelectedPattern(null)
     setIsolationMode(null)
+    setLazyTraceCache({})
+    lazyFetchingRef.current.clear()
     setStatus({ type: 'running', text: 'Running detection…' })
     const t0 = performance.now()
     try {
@@ -179,7 +185,35 @@ export default function App() {
 
   const handleExitIsolation = useCallback(() => setIsolationMode(null), [])
 
-  const candle_logs = detectionResult?.candle_logs ?? {}
+  const isLazyMode = detectionResult?.lazy_traces === true
+  const candle_logs_raw = detectionResult?.candle_logs ?? {}
+
+  // Merge lazy-loaded traces into candle_logs
+  const candle_logs = useMemo(() => {
+    if (!isLazyMode) return candle_logs_raw
+    return { ...candle_logs_raw, ...lazyTraceCache }
+  }, [candle_logs_raw, lazyTraceCache, isLazyMode])
+
+  // Lazy-fetch traces when hovering in lazy mode
+  const activeBarForTrace = isolationMode ? isolationMode.xIdx : hoveredBarIdx
+  useEffect(() => {
+    if (!isLazyMode || activeBarForTrace == null) return
+    const key = String(activeBarForTrace)
+    // Already have data or already fetching
+    if (candle_logs[key] || lazyFetchingRef.current.has(key)) return
+
+    lazyFetchingRef.current.add(key)
+    axios.post('/api/trace_bar', { x_idx: activeBarForTrace }, { timeout: 30000 })
+      .then(r => {
+        setLazyTraceCache(prev => ({ ...prev, [key]: r.data.attempts }))
+      })
+      .catch(() => {
+        // Silently fail — summary will show "no attempts"
+      })
+      .finally(() => {
+        lazyFetchingRef.current.delete(key)
+      })
+  }, [isLazyMode, activeBarForTrace, candle_logs])
 
   // Client-side direction filter
   const displayedResult = useMemo(() => {
@@ -255,6 +289,7 @@ export default function App() {
           hoveredBarIdx={hoveredBarIdx}
           isolationMode={isolationMode}
           candleLogs={candle_logs}
+          lazyMode={isLazyMode}
         />
       </div>
 

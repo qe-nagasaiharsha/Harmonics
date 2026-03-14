@@ -15,12 +15,14 @@ from __future__ import annotations
 import copy
 from typing import Callable, Dict, List, Optional, Tuple
 
+import numpy as np
+
 from .types import (
     ChannelType, PatternDirection, PatternResult, PatternType, Wave,
     XAttemptLog,
 )
 from .config import DetectorConfig
-from .diagnostics import DiagnosticLog
+from .diagnostics import DiagnosticLog, NULL_DIAG
 from .channels import get_a_channel_slope
 from . import validators as V
 from . import candidates as C
@@ -61,6 +63,21 @@ class PatternDetector:
     def __init__(self, candles) -> None:
         self._candles = candles
         self._total_bars = len(candles) - 1
+
+        # Precompute local extrema arrays (numpy) — avoids per-bar Python loops
+        n = len(candles)
+        if n >= 3:
+            lo, hi = candles.low, candles.high
+            self._low_extrema = np.empty(n, dtype=bool)
+            self._low_extrema[0] = self._low_extrema[-1] = False
+            self._low_extrema[1:-1] = (lo[1:-1] <= lo[:-2]) & (lo[1:-1] <= lo[2:])
+
+            self._high_extrema = np.empty(n, dtype=bool)
+            self._high_extrema[0] = self._high_extrema[-1] = False
+            self._high_extrema[1:-1] = (hi[1:-1] >= hi[:-2]) & (hi[1:-1] >= hi[2:])
+        else:
+            self._low_extrema = np.zeros(n, dtype=bool)
+            self._high_extrema = np.zeros(n, dtype=bool)
 
     # -- Price accessor helpers (match MQL5 iHigh / iLow / iClose) --
 
@@ -145,6 +162,30 @@ class PatternDetector:
         if collect_traces:
             return results, traces, detection_log
         return results
+
+    def trace_single_bar(
+        self,
+        x_idx: int,
+        cfg: DetectorConfig,
+    ) -> List[XAttemptLog]:
+        """Run detection for a single X bar with full tracing.
+
+        Used for lazy trace loading — the main detection can skip traces for
+        performance, then this fetches detailed traces on-demand when the user
+        hovers a specific bar.
+        """
+        all_attempts: List[XAttemptLog] = []
+        for active_ct in cfg.channel_types_to_run():
+            _, attempts_low = self._try_from_x(
+                x_idx, True, active_ct, cfg, -9999, True,
+            )
+            all_attempts.extend(attempts_low)
+
+            _, attempts_high = self._try_from_x(
+                x_idx, False, active_ct, cfg, -9999, True,
+            )
+            all_attempts.extend(attempts_high)
+        return all_attempts
 
     @staticmethod
     def _log_attempts(log: list, attempts: list, channel: str) -> None:
@@ -235,30 +276,30 @@ class PatternDetector:
         x_is_low: bool,
         cfg: DetectorConfig,
     ) -> List[tuple]:
-        """Collect and sort B candidates (local extrema in range)."""
+        """Collect and sort B candidates using precomputed numpy extrema."""
         b_start = x_idx - 1 - cfg.b_min
-        b_end = max(x_idx - cfg.b_max, 0)
+        b_end = max(x_idx - cfg.b_max, 1)
 
-        price_fn = self._low if x_is_low else self._high
-        cands: list[tuple[int, float]] = []
+        if b_start <= b_end or b_start <= 0:
+            return []
 
-        for i in range(b_start, b_end, -1):
-            if i <= 0:
-                break
-            curr = price_fn(i)
-            prev = price_fn(i + 1)
-            nxt = price_fn(i - 1)
+        b_start = min(b_start, self._total_bars)
 
-            if x_is_low:
-                is_ext = curr <= prev and curr <= nxt
-            else:
-                is_ext = curr >= prev and curr >= nxt
+        extrema = self._low_extrema if x_is_low else self._high_extrema
+        prices = self._candles.low if x_is_low else self._candles.high
 
-            if is_ext:
-                cands.append((i, curr))
+        # Numpy slice + nonzero — replaces per-bar Python loop
+        mask = extrema[b_end:b_start + 1]
+        if not mask.any():
+            return []
 
-        cands.sort(key=lambda c: c[1], reverse=not x_is_low)
-        return cands
+        local_idx = np.nonzero(mask)[0]
+        abs_idx = local_idx + b_end
+        cand_prices = prices[abs_idx]
+
+        # Sort: ascending for lows, descending for highs
+        order = np.argsort(cand_prices) if x_is_low else np.argsort(-cand_prices)
+        return [(int(abs_idx[i]), float(cand_prices[i])) for i in order]
 
     def _try_with_b(
         self,
@@ -274,7 +315,8 @@ class PatternDetector:
         collect_traces: bool,
     ) -> Tuple[Optional[PatternResult], Optional[XAttemptLog]]:
         """Build pattern with specific B. Returns (PatternResult|None, XAttemptLog|None)."""
-        diag = DiagnosticLog()
+        # Use NULL_DIAG when not tracing — eliminates millions of DiagnosticRecord allocations
+        diag = DiagnosticLog() if collect_traces else NULL_DIAG
         wave = Wave()
         wave.x_idx = x_idx
         wave.x_price = x_price
@@ -296,28 +338,28 @@ class PatternDetector:
 
         xb_slope = (b_price - x_price) / bars_x_b
 
-        # -- Find A (max deviation from XB slope) --
-        xb_array = [x_price + j * xb_slope for j in range(bars_x_b + 1)]
+        # -- Find A (max deviation from XB slope) — VECTORISED with numpy --
+        a_bar_range = np.arange(b_idx + 1, x_idx)
+        if len(a_bar_range) == 0:
+            if attempt:
+                attempt.reject("A_FIND", "No bars between X and B for A search")
+                attempt.partial_wave = _snapshot_wave(wave)
+            return None, attempt
 
-        max_dev = -1e300
-        a_idx = -1
-        a_price = 0.0
+        a_offsets = x_idx - a_bar_range
+        xb_vals = x_price + a_offsets * xb_slope
 
-        for i in range(x_idx - 1, b_idx, -1):
-            offset = x_idx - i
-            if offset >= len(xb_array):
-                continue
-            xb_val = xb_array[offset]
-            if x_is_low:
-                price = self._high(i)
-                dev = price - xb_val
-            else:
-                price = self._low(i)
-                dev = xb_val - price
-            if dev > max_dev:
-                max_dev = dev
-                a_idx = i
-                a_price = price
+        if x_is_low:
+            a_prices = self._candles.high[a_bar_range]
+            devs = a_prices - xb_vals
+        else:
+            a_prices = self._candles.low[a_bar_range]
+            devs = xb_vals - a_prices
+
+        best_pos = int(np.argmax(devs))
+        max_dev = float(devs[best_pos])
+        a_idx = int(a_bar_range[best_pos])
+        a_price = float(a_prices[best_pos])
 
         if a_idx == -1 or max_dev <= 0:
             if attempt:
@@ -382,13 +424,7 @@ class PatternDetector:
 
         # -- A width check --
         a_offset = x_idx - a_idx
-        if a_offset < 0 or a_offset >= len(xb_array):
-            if attempt:
-                attempt.reject("A_WIDTH", f"A offset {a_offset} out of XB array bounds")
-                attempt.partial_wave = _snapshot_wave(wave)
-            return None, attempt
-
-        z = xb_array[a_offset]
+        z = x_price + a_offset * xb_slope
         b_start_local = x_idx - 1 - cfg.b_min
         dyn_candles = max(b_start_local - b_idx, 0)
         inc_val = (dyn_candles // cfg.every_increasing_of_value + 1) * cfg.width_increasing_percentage_x_to_b
