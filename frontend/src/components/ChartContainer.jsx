@@ -291,9 +291,9 @@ const LS_DOTTED = 1
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function ChartContainer({
-    data, config, selectedPattern, pinnedBar,
+    data, config, selectedPattern,
     isolationMode, isolatedAttempts, candleLogs,
-    onHover, onBarClick, onContextMenu, onExitIsolation,
+    onHover, onContextMenu, onExitIsolation,
 }) {
     const containerRef    = useRef(null)
     const chartRef        = useRef(null)
@@ -301,14 +301,12 @@ export default function ChartContainer({
     const patternSeriesRef = useRef([])
     const rawCandlesRef   = useRef(null)
     const onHoverRef      = useRef(onHover)
-    const onBarClickRef   = useRef(onBarClick)
     const onContextMenuRef = useRef(onContextMenu)
     const crosshairBoxRef = useRef(null)
     const isMountedRef    = useRef(false)
     const [chartError, setChartError] = useState(null)
 
     onHoverRef.current     = onHover
-    onBarClickRef.current  = onBarClick
     onContextMenuRef.current = onContextMenu
 
     // ---- Find candle by click coordinates ----
@@ -368,16 +366,6 @@ export default function ChartContainer({
                             `<span class="price-item"><span class="label">L</span><span class="val" style="color:var(--bear-color)">${ohlcv.low?.toFixed(5)}</span></span>` +
                             `<span class="price-item"><span class="label">C</span><span class="val">${ohlcv.close?.toFixed(5)}</span></span>`
                     }
-                }
-            })
-
-            // Left-click → pin bar (logs shown in right panel)
-            container.addEventListener('click', (e) => {
-                if (e.button !== 0) return
-                const found = findCandleAtX(e.clientX)
-                if (found) {
-                    const ohlcv = { open: found.open, high: found.high, low: found.low, close: found.close }
-                    onBarClickRef.current({ idx: found.idx, time: Math.floor(found.time), ...ohlcv })
                 }
             })
 
@@ -619,11 +607,6 @@ export default function ChartContainer({
                 {data ? (
                     <>
                         <span>{data.bars_scanned} bars</span>
-                        {pinnedBar && (
-                            <span style={{ background: 'var(--accent-blue)', color: '#fff', fontSize: 10, padding: '2px 7px', borderRadius: 10, marginLeft: 8 }}>
-                                pinned #{pinnedBar.idx}
-                            </span>
-                        )}
                         {isolationMode && (
                             <span className="isolation-badge" onClick={onExitIsolation} title="Click to exit isolation mode">
                                 ISOLATION: X#{isolationMode.xIdx} {isolationMode.xIsLow ? 'LOW (X<B)' : 'HIGH (X>B)'}

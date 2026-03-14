@@ -77,7 +77,6 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const [status, setStatus] = useState({ type: 'idle', text: 'Upload a data file and click Detect' })
   const [detectionResult, setDetectionResult] = useState(null)
-  const [pinnedBar, setPinnedBar] = useState(null)
   const [selectedPattern, setSelectedPattern] = useState(null)
 
   const [hoveredBarIdx, setHoveredBarIdx] = useState(null)
@@ -136,7 +135,6 @@ export default function App() {
     }
     setLoading(true)
     setDetectionResult(null)
-    setPinnedBar(null)
     setSelectedPattern(null)
     setIsolationMode(null)
     setStatus({ type: 'running', text: 'Running detection…' })
@@ -168,10 +166,6 @@ export default function App() {
     })
   }, [])
 
-  const handleBarClick = useCallback((bar) => {
-    setPinnedBar(prev => (prev && prev.idx === bar.idx) ? null : bar)
-  }, [])
-
   // Right-click context menu handlers
   const handleContextMenu = useCallback((info) => {
     setContextMenu(info)  // { x, y, barIdx }
@@ -181,13 +175,7 @@ export default function App() {
     if (!contextMenu) return
     setIsolationMode({ xIdx: contextMenu.barIdx, xIsLow })
     setContextMenu(null)
-    // Also pin this bar so the LogPanel shows its traces
-    const candles = detectionResult?.candles
-    if (candles) {
-      const c = candles.find(c => c.idx === contextMenu.barIdx)
-      if (c) setPinnedBar({ idx: c.idx, time: Math.floor(c.time), open: c.open, high: c.high, low: c.low, close: c.close })
-    }
-  }, [contextMenu, detectionResult])
+  }, [contextMenu])
 
   const handleExitIsolation = useCallback(() => setIsolationMode(null), [])
 
@@ -255,19 +243,16 @@ export default function App() {
           data={displayedResult}
           config={config}
           selectedPattern={selectedPattern}
-          pinnedBar={pinnedBar}
           isolationMode={isolationMode}
           isolatedAttempts={isolatedAttempts}
           candleLogs={candle_logs}
           onHover={handleHover}
-          onBarClick={handleBarClick}
           onContextMenu={handleContextMenu}
           onExitIsolation={handleExitIsolation}
         />
         <LogPanel
           detectionLog={detectionResult?.detection_log ?? []}
           hoveredBarIdx={hoveredBarIdx}
-          pinnedBar={pinnedBar}
           isolationMode={isolationMode}
           candleLogs={candle_logs}
         />

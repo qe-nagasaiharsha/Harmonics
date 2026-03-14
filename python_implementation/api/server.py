@@ -486,26 +486,26 @@ async def detect(req: DetectRequest):
     ]
 
     # Serialise traces: Dict[int, List[XAttemptLog]] -> JSON-safe
-    # Cap at 500 logged X-candles to limit payload size
-    max_logged = 500
-    sorted_keys = sorted(traces.keys(), reverse=False)[:max_logged]
+    # Send ALL X-candles so hover works on every bar.
+    # To keep payload manageable, trim step detail for X-candles with many attempts.
     candle_logs_out = {
-        str(x_idx): _serialize_attempts(traces[x_idx])
-        for x_idx in sorted_keys
+        str(x_idx): _serialize_attempts(attempts)
+        for x_idx, attempts in traces.items()
     }
 
     # Trim detection_log for large runs to avoid massive payloads
-    # Each entry has nested step arrays — cap to 5000 entries
+    # The narrative summary in the frontend uses candle_logs (above) for per-bar
+    # hover, so detection_log is only used for the default full-list view.
     raw_log = detection_log or []
-    if len(raw_log) > 5000:
-        # Keep channel dividers + first 2500 and last 2500 attempt entries
+    max_log = max(10000, req.max_bars * 10)  # scale with bar count
+    if len(raw_log) > max_log:
+        half = max_log // 2
         channels = [e for e in raw_log if e.get('type') == 'channel']
         attempts = [e for e in raw_log if e.get('type') != 'channel']
-        trimmed = channels + attempts[:2500] + attempts[-2500:]
-        # Strip full step details from middle entries to reduce size further
+        trimmed = channels + attempts[:half] + attempts[-half:]
+        # Strip verbose step arrays to reduce size
         for entry in trimmed:
             if entry.get('steps') and len(entry['steps']) > 0:
-                # Keep only the failing step to save space
                 fail_step = next((s for s in entry['steps'] if not s.get('passed')), None)
                 entry['steps'] = [fail_step] if fail_step else []
         detection_log_out = trimmed
