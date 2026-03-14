@@ -1,165 +1,221 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from 'react'
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Step classification: maps step_reached → pipeline stage
+// Constants: B-stage step order, labels, candidate check names
 // ─────────────────────────────────────────────────────────────────────────────
-const STEP_TO_STAGE = {
-    // B-stage: finding B candidate and validating XAB triangle
-    B_SEARCH:     'B',
-    A_FIND:       'B',
-    XB_RETRACE:   'B',
-    A_WIDTH:      'B',
-    A_SECONDARY:  'B',
-    XB_SEGMENT:   'B',
-    XB_SPAN:      'B',
-    P_POINT:      'B',
-    PX_SEGMENT:   'B',
-    // C-stage
-    C_SEARCH:     'C',
-    C_POSITION:   'C',
-    CASCADE:      'C',
-    // D-stage
-    D_CANDIDATES: 'D',
-    // E-stage
-    E_CANDIDATES: 'E',
-    // F-stage
-    F_CANDIDATES: 'F',
-    // Post-detection filters
-    TICK_SPEED:   'FILTER',
-    DIVERGENCE:   'FILTER',
-    DIRECTION:    'FILTER',
-    OVERLAP:      'FILTER',
-    // Success
-    FINALIZE:     'SUCCESS',
+const B_STEPS = [
+    'B_SEARCH', 'A_FIND', 'XB_RETRACE', 'A_WIDTH', 'A_SECONDARY',
+    'XB_SEGMENT', 'XB_SPAN', 'P_POINT', 'PX_SEGMENT',
+]
+
+const FILTER_STEPS = ['TICK_SPEED', 'DIVERGENCE', 'DIRECTION', 'OVERLAP']
+
+const STEP_LABELS = {
+    B_SEARCH:     'B Distance',
+    A_FIND:       'A Point Found',
+    XB_RETRACE:   'XB Retracement',
+    A_WIDTH:      'A Width Band',
+    A_SECONDARY:  'Secondary A Scan',
+    XB_SEGMENT:   'XB Segment Check',
+    XB_SPAN:      'XB Span Containment',
+    P_POINT:      'P Point Available',
+    PX_SEGMENT:   'PX Segment Check',
+    C_SEARCH:     'C Candidates',
+    CASCADE:      'Cascade Search',
+    TICK_SPEED:   'Tick Speed',
+    DIVERGENCE:   'Divergence',
+    DIRECTION:    'Direction Filter',
+    OVERLAP:      'Overlap Filter',
+    FINALIZE:     'Pattern Confirmed',
+    POINTS:       'Final Points',
 }
 
-const STAGE_ORDER = ['B', 'C', 'D', 'E', 'F', 'FILTER']
-const STAGE_LABELS = { B: 'B Point', C: 'C Point', D: 'D Point', E: 'E Point', F: 'F Point', FILTER: 'Final Filters' }
+const CANDIDATE_CHECK_LABELS = ['Channel', 'Extremum', 'Fix Reval', 'Segment', 'Span']
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Human-readable explanations for each step failure
+// Human-readable value descriptions for B-stage steps
 // ─────────────────────────────────────────────────────────────────────────────
-function explainStep(step, count, avgValue, thresholds) {
+function stepValueDesc(step, avgValue, thresholds, passed, checked) {
     const avg = avgValue != null ? avgValue.toFixed(2) : null
-    const range = thresholds ? `[${thresholds.min.toFixed(1)}, ${thresholds.max.toFixed(1)}]` : null
+    const range = thresholds
+        ? `[${thresholds.min.toFixed(1)}, ${thresholds.max.toFixed(1)}]`
+        : null
 
     switch (step) {
         case 'B_SEARCH':
-            return `${count} had no valid B candidate in the configured bar range`
+            return avg ? `avg ${avg} bars from X` : 'B candidate found in range'
         case 'A_FIND':
-            return `${count} found B but no valid A point \u2014 no candle deviated enough from the XB slope to form a channel`
+            return avg ? `max slope deviation avg ${avg}` : 'max deviation from XB slope'
         case 'XB_RETRACE':
-            return avg && range
-                ? `${count} failed XB retracement check (avg ${avg}% vs allowed ${range})`
-                : `${count} failed XB retracement check \u2014 ratio outside allowed range`
+            if (avg && range) {
+                return passed === checked
+                    ? `avg ${avg}% within ${range}`
+                    : `avg ${avg}% — allowed ${range}`
+            }
+            return 'XB retracement ratio check'
         case 'A_WIDTH':
-            return avg
-                ? `${count} failed A-width validation (A price deviation ${avg} outside dynamic width band)`
-                : `${count} failed A-width validation \u2014 A point sits outside the channel width band`
+            if (avg && range) {
+                return passed === checked
+                    ? `A price avg ${avg} within band ${range}`
+                    : `A price avg ${avg} — band ${range}`
+            }
+            return 'A price within dynamic width band'
         case 'A_SECONDARY':
-            return `${count} failed secondary A scan \u2014 a more extreme A point pushed retracement out of range`
+            return avg && passed < checked
+                ? `secondary A shifted retrace to avg ${avg}%`
+                : 'no more extreme A found'
         case 'XB_SEGMENT':
-            return `${count} failed XB strict segment check \u2014 candles between X and B breach the slope line`
+            return passed === checked
+                ? 'all bars between X and B respect slope'
+                : 'bars between X and B breach slope line'
         case 'XB_SPAN':
-            return `${count} failed X-to-B span containment \u2014 price excursions exceed the allowed buffer`
+            return passed === checked
+                ? 'all bars within span buffer'
+                : 'price excursions exceed span buffer'
         case 'P_POINT':
-            return `${count} had insufficient bars before X to establish the P point`
+            return passed === checked
+                ? 'enough bars before X for P'
+                : 'insufficient bars before X'
         case 'PX_SEGMENT':
-            return `${count} failed P-to-X segment validation \u2014 candles breach the PX slope`
-        case 'C_SEARCH':
-            return `${count} found no valid C \u2014 no candle after B within the configured length range lies on the A slope`
-        case 'C_POSITION':
-            return avg && range
-                ? `${count} found C candidates but they failed position validation (avg ${avg} vs ${range})`
-                : `${count} found C candidates on the A slope but highs/lows between B and C breach constraints`
-        case 'CASCADE':
-            return `${count} exhausted all C/D/E/F candidate combinations without finding a valid pattern`
-        case 'D_CANDIDATES':
-            return `${count} found valid C but no D candidate exists within the required length range in the XB channel`
-        case 'E_CANDIDATES':
-            return `${count} found valid D but no E candidate exists within the required length range in the A channel`
-        case 'F_CANDIDATES':
-            return `${count} found valid E but no F candidate exists within the required length range in the XB channel`
-        case 'TICK_SPEED':
-            return `${count} formed a complete pattern but failed the minimum tick speed filter`
-        case 'DIVERGENCE':
-            return `${count} formed a complete pattern but failed the divergence filter`
-        case 'DIRECTION':
-            return `${count} formed a complete pattern but were filtered by direction preference`
-        case 'OVERLAP':
-            return `${count} formed a complete pattern but overlap with a prior detection`
+            return passed === checked
+                ? 'all PX bars respect slope'
+                : 'bars between P and X breach slope'
         default:
-            return `${count} failed at ${step}`
+            return ''
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Build narrative summary for one direction (bullish or bearish)
+// Build elaborate narrative for one direction (bullish or bearish)
 // ─────────────────────────────────────────────────────────────────────────────
 function buildDirectionSummary(attempts) {
     if (!attempts.length) return null
 
     const succeeded = attempts.filter(a => a.succeeded)
-    const failed = attempts.filter(a => !a.succeeded)
+    const total = attempts.length
 
-    // Group failed attempts by pipeline stage
-    const stageGroups = {}
-    failed.forEach(a => {
-        const step = (a.step_reached || 'B_SEARCH').toUpperCase()
-        const stage = STEP_TO_STAGE[step] || 'B'
-        if (!stageGroups[stage]) stageGroups[stage] = []
-        stageGroups[stage].push(a)
+    // ── B-Stage: aggregate ALL steps across all attempts ──
+    const stepStats = {}
+    attempts.forEach(a => {
+        (a.steps || []).forEach(s => {
+            if (!stepStats[s.step]) {
+                stepStats[s.step] = { checked: 0, passed: 0, failed: 0, values: [], thresholds: null }
+            }
+            const stat = stepStats[s.step]
+            stat.checked++
+            if (s.passed) stat.passed++
+            else stat.failed++
+            if (s.value != null && typeof s.value === 'number' && s.value !== 0) {
+                stat.values.push(s.value)
+            }
+            if (s.threshold_min != null && s.threshold_max != null
+                && (s.threshold_min !== 0 || s.threshold_max !== 0)
+                && !stat.thresholds) {
+                stat.thresholds = { min: s.threshold_min, max: s.threshold_max }
+            }
+        })
     })
 
-    // Build stages array
-    const stages = STAGE_ORDER
-        .filter(stage => stageGroups[stage]?.length > 0)
-        .map(stage => {
-            const stageAttempts = stageGroups[stage]
+    // Build B-stage rows
+    const bStageRows = B_STEPS.filter(step => stepStats[step]).map(step => {
+        const stat = stepStats[step]
+        const allPass = stat.passed === stat.checked
+        const avgValue = stat.values.length > 0
+            ? stat.values.reduce((a, b) => a + b, 0) / stat.values.length
+            : null
+        return {
+            step,
+            label: STEP_LABELS[step] || step,
+            checked: stat.checked,
+            passed: stat.passed,
+            failed: stat.failed,
+            allPass,
+            avgValue,
+            thresholds: stat.thresholds,
+            desc: stepValueDesc(step, avgValue, stat.thresholds, stat.passed, stat.checked),
+        }
+    })
 
-            // Sub-group by exact step_reached
-            const byStep = {}
-            stageAttempts.forEach(a => {
-                const step = a.step_reached || 'B_SEARCH'
-                if (!byStep[step]) byStep[step] = { count: 0, values: [], thresholds: null }
-                byStep[step].count++
-                // Extract failing step's numeric data
-                const failStep = a.steps?.find(s => !s.passed)
-                if (failStep?.value != null && typeof failStep.value === 'number')
-                    byStep[step].values.push(failStep.value)
-                if (failStep?.threshold_min != null && !byStep[step].thresholds)
-                    byStep[step].thresholds = { min: failStep.threshold_min, max: failStep.threshold_max }
+    // ── Candidate stages: aggregate candidate_info from all attempts ──
+    const candidateInfoMap = {}
+    attempts.forEach(a => {
+        if (a.candidate_info) {
+            Object.entries(a.candidate_info).forEach(([point, info]) => {
+                if (!candidateInfoMap[point]) candidateInfoMap[point] = []
+                candidateInfoMap[point].push(info)
+            })
+        }
+    })
+
+    // Also check if C_SEARCH step exists to count attempts that reached C
+    const cSearchStat = stepStats['C_SEARCH']
+    const cascadeStat = stepStats['CASCADE']
+
+    const candidateStages = ['C', 'D', 'E', 'F']
+        .filter(pt => candidateInfoMap[pt]?.length > 0)
+        .map(pt => {
+            const infos = candidateInfoMap[pt]
+            const totalScanned = infos.reduce((s, i) => s + (i.total_scanned || 0), 0)
+            const totalValid = infos.reduce((s, i) => s + (i.valid_count || 0), 0)
+            const channelName = infos[0]?.channel_name || ''
+
+            // Merge funnel counts
+            const mergedFunnel = [0, 0, 0, 0, 0]
+            infos.forEach(i => {
+                (i.funnel || []).forEach((v, idx) => { mergedFunnel[idx] += v })
             })
 
-            // Count how many attempts got past this stage
-            const stageIdx = STAGE_ORDER.indexOf(stage)
-            const laterStages = STAGE_ORDER.slice(stageIdx + 1)
-            const progressedCount = laterStages.reduce(
-                (sum, s) => sum + (stageGroups[s]?.length || 0), 0
-            ) + succeeded.length
-
-            // Generate per-step explanations
-            const explanations = Object.entries(byStep)
-                .sort((a, b) => b[1].count - a[1].count)
-                .map(([step, info]) => {
-                    const avgValue = info.values.length >= 1
-                        ? info.values.reduce((a, b) => a + b, 0) / info.values.length
-                        : null
-                    return explainStep(step, info.count, avgValue, info.thresholds)
-                })
+            // Find best rejected across all infos
+            let bestRej = null
+            infos.forEach(i => {
+                if (i.best_rejected && (!bestRej || i.best_rejected.checks_passed > bestRej.checks_passed)) {
+                    bestRej = i.best_rejected
+                }
+            })
 
             return {
-                pointLabel: STAGE_LABELS[stage] || stage,
-                total: stageAttempts.length,
-                progressedCount,
-                explanations,
+                point: pt,
+                channelName,
+                totalScanned,
+                totalValid,
+                funnel: mergedFunnel,
+                bestRejected: bestRej,
+                attemptCount: infos.length,
             }
         })
 
+    // ── Filter steps (post-detection) ──
+    const filterRows = FILTER_STEPS.filter(step => stepStats[step]).map(step => {
+        const stat = stepStats[step]
+        return {
+            step,
+            label: STEP_LABELS[step] || step,
+            checked: stat.checked,
+            passed: stat.passed,
+            failed: stat.failed,
+            allPass: stat.passed === stat.checked,
+        }
+    })
+
+    // ── C-search summary row (how many attempts found C vs not) ──
+    const cSearchInfo = cSearchStat ? {
+        checked: cSearchStat.checked,
+        passed: cSearchStat.passed,
+        failed: cSearchStat.failed,
+    } : null
+
+    const cascadeInfo = cascadeStat ? {
+        count: cascadeStat.checked,
+    } : null
+
     return {
-        totalAttempts: attempts.length,
+        totalAttempts: total,
         succeeded: succeeded.length,
-        stages,
+        bStageRows,
+        candidateStages,
+        filterRows,
+        cSearchInfo,
+        cascadeInfo,
         result: succeeded.length > 0 ? 'success' : 'no_pattern',
     }
 }
@@ -219,7 +275,6 @@ export default function LogPanel({ detectionLog, hoveredBarIdx, isolationMode, c
     const narrativeSummary = useMemo(() => {
         if (activeBarIdx == null) return null
 
-        // Prefer candleLogs (richer, pre-indexed by bar) over filtered detectionLog
         const barKey = String(activeBarIdx)
         let attempts = candleLogs?.[barKey] ?? []
 
@@ -256,7 +311,7 @@ export default function LogPanel({ detectionLog, hoveredBarIdx, isolationMode, c
         })
     }, [])
 
-    // Track whether we have any data at all (streaming sends candle_logs but not detection_log)
+    // Track whether we have any data at all
     const hasAnyData = (detectionLog?.length > 0) || (candleLogs && Object.keys(candleLogs).length > 0)
 
     // ── Empty state ──
@@ -304,7 +359,6 @@ export default function LogPanel({ detectionLog, hoveredBarIdx, isolationMode, c
                     </div>
                 )}
 
-                {/* Filter controls: only shown when no bar is active (log list mode) */}
                 {activeBarIdx == null && (
                     <div className="log-controls-row">
                         <div className="log-filter-row">
@@ -333,7 +387,7 @@ export default function LogPanel({ detectionLog, hoveredBarIdx, isolationMode, c
                 )}
             </div>
 
-            {/* ── SUMMARY MODE (bar active) ── */}
+            {/* ── NARRATIVE SUMMARY MODE (bar active) ── */}
             {narrativeSummary ? (
                 <div className="narrative-summary" ref={scrollRef}>
                     {narrativeSummary.map((dir, di) => (
@@ -356,36 +410,178 @@ export default function LogPanel({ detectionLog, hoveredBarIdx, isolationMode, c
                                 </div>
                             )}
 
-                            {/* Stage narratives — only when NO pattern found */}
-                            {dir.succeeded === 0 && dir.stages.map((stage, si) => (
-                                <div key={si} className="narrative-stage">
+                            {/* ━━ B Point Validation ━━ */}
+                            {dir.bStageRows.length > 0 && (
+                                <div className="narrative-stage">
                                     <div className="narrative-stage-header">
-                                        <span className="narrative-stage-label">{stage.pointLabel}</span>
-                                        <span className="narrative-stage-count">{stage.total} failed</span>
+                                        <span className="narrative-stage-label">B Point Validation</span>
+                                        <span className="narrative-stage-count">{dir.totalAttempts} attempts</span>
                                     </div>
                                     <div className="narrative-stage-body">
-                                        {stage.explanations.map((text, ei) => (
-                                            <p key={ei} className="narrative-explanation">{text}</p>
+                                        {dir.bStageRows.map((row, ri) => (
+                                            <div key={ri} className={`narr-metric-row ${row.allPass ? 'pass' : 'fail'}`}>
+                                                <span className="narr-metric-icon">
+                                                    {row.allPass ? '\u2713' : '\u2717'}
+                                                </span>
+                                                <span className="narr-metric-label">{row.label}</span>
+                                                <span className="narr-metric-ratio">
+                                                    {row.passed}/{row.checked}
+                                                </span>
+                                                <span className="narr-metric-desc">{row.desc}</span>
+                                            </div>
                                         ))}
-                                        {stage.progressedCount > 0 && (
-                                            <p className="narrative-progressed">
-                                                {stage.progressedCount} attempt{stage.progressedCount !== 1 ? 's' : ''} progressed beyond this stage
-                                            </p>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* ━━ C Search summary ━━ */}
+                            {dir.cSearchInfo && (
+                                <div className="narrative-stage">
+                                    <div className="narrative-stage-header">
+                                        <span className="narrative-stage-label">C Point Search</span>
+                                        <span className="narrative-stage-count">
+                                            {dir.cSearchInfo.passed} found / {dir.cSearchInfo.checked} checked
+                                        </span>
+                                    </div>
+                                    <div className="narrative-stage-body">
+                                        {dir.cSearchInfo.passed > 0 && (
+                                            <div className="narr-metric-row pass">
+                                                <span className="narr-metric-icon">{'\u2713'}</span>
+                                                <span className="narr-metric-label">Valid C found</span>
+                                                <span className="narr-metric-ratio">{dir.cSearchInfo.passed}/{dir.cSearchInfo.checked}</span>
+                                                <span className="narr-metric-desc">
+                                                    {dir.cSearchInfo.passed} attempt{dir.cSearchInfo.passed !== 1 ? 's' : ''} found C candidates on the A-channel
+                                                </span>
+                                            </div>
+                                        )}
+                                        {dir.cSearchInfo.failed > 0 && (
+                                            <div className="narr-metric-row fail">
+                                                <span className="narr-metric-icon">{'\u2717'}</span>
+                                                <span className="narr-metric-label">No valid C</span>
+                                                <span className="narr-metric-ratio">{dir.cSearchInfo.failed}/{dir.cSearchInfo.checked}</span>
+                                                <span className="narr-metric-desc">
+                                                    {dir.cSearchInfo.failed} attempt{dir.cSearchInfo.failed !== 1 ? 's' : ''} found no valid C in search range
+                                                </span>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* ━━ Candidate point stages (C, D, E, F funnel) ━━ */}
+                            {dir.candidateStages.map((cs, ci) => (
+                                <div key={ci} className="narrative-stage">
+                                    <div className="narrative-stage-header">
+                                        <span className="narrative-stage-label">
+                                            {cs.point} Point Candidates
+                                        </span>
+                                        <span className="narrative-stage-count">
+                                            {cs.channelName}-channel
+                                        </span>
+                                    </div>
+                                    <div className="narrative-stage-body">
+                                        <p className="narr-scan-line">
+                                            Scanned {cs.totalScanned} bar{cs.totalScanned !== 1 ? 's' : ''} across {cs.attemptCount} attempt{cs.attemptCount !== 1 ? 's' : ''}
+                                        </p>
+
+                                        {/* Funnel visualization */}
+                                        <div className="narr-funnel">
+                                            {CANDIDATE_CHECK_LABELS.map((name, fi) => (
+                                                <div key={fi} className={`narr-funnel-step ${cs.funnel[fi] > 0 ? 'active' : 'empty'}`}>
+                                                    <span className="narr-funnel-count">{cs.funnel[fi]}</span>
+                                                    <span className="narr-funnel-label">{name}</span>
+                                                </div>
+                                            ))}
+                                            <div className={`narr-funnel-step result ${cs.totalValid > 0 ? 'active' : 'empty'}`}>
+                                                <span className="narr-funnel-count">{cs.totalValid}</span>
+                                                <span className="narr-funnel-label">Valid</span>
+                                            </div>
+                                        </div>
+
+                                        {/* Best rejected candidate */}
+                                        {cs.bestRejected && (
+                                            <div className="narr-best-rejected">
+                                                <div className="narr-best-rej-header">
+                                                    Best rejected: bar #{cs.bestRejected.bar_idx}
+                                                    <span className="narr-best-rej-score">
+                                                        {cs.bestRejected.checks_passed}/5 checks passed
+                                                    </span>
+                                                </div>
+                                                <div className="narr-best-rej-checks">
+                                                    {CANDIDATE_CHECK_LABELS.map((name, fi) => {
+                                                        const passed = fi < cs.bestRejected.checks_passed
+                                                        const isFail = fi === cs.bestRejected.checks_passed
+                                                            && cs.bestRejected.failed_at === ['channel', 'extremum', 'fix_reval', 'segment', 'span'][fi]
+                                                        const notChecked = fi > cs.bestRejected.checks_passed
+                                                        return (
+                                                            <span key={fi} className={`narr-rej-check ${passed ? 'pass' : isFail ? 'fail' : 'skip'}`}>
+                                                                {passed ? '\u2713' : isFail ? '\u2717' : '\u2500'}{' '}{name}
+                                                            </span>
+                                                        )
+                                                    })}
+                                                </div>
+                                                {cs.bestRejected.checks_passed === 0 && cs.bestRejected.channel_center > 0 && (
+                                                    <p className="narr-rej-detail">
+                                                        Price {cs.bestRejected.channel_value?.toFixed(2)} outside channel center {cs.bestRejected.channel_center?.toFixed(2)} {'\u00B1'} [{cs.bestRejected.channel_lower?.toFixed(1)}%, {cs.bestRejected.channel_upper?.toFixed(1)}%]
+                                                    </p>
+                                                )}
+                                            </div>
                                         )}
                                     </div>
                                 </div>
                             ))}
 
-                            {/* Result — only when no pattern found */}
-                            {dir.succeeded === 0 && (
-                                <div className="narrative-result none">
-                                    {'\u2717'} No pattern found
+                            {/* ━━ Post-detection filters ━━ */}
+                            {dir.filterRows.length > 0 && (
+                                <div className="narrative-stage">
+                                    <div className="narrative-stage-header">
+                                        <span className="narrative-stage-label">Post-Detection Filters</span>
+                                    </div>
+                                    <div className="narrative-stage-body">
+                                        {dir.filterRows.map((row, ri) => (
+                                            <div key={ri} className={`narr-metric-row ${row.allPass ? 'pass' : 'fail'}`}>
+                                                <span className="narr-metric-icon">
+                                                    {row.allPass ? '\u2713' : '\u2717'}
+                                                </span>
+                                                <span className="narr-metric-label">{row.label}</span>
+                                                <span className="narr-metric-ratio">{row.passed}/{row.checked}</span>
+                                                <span className="narr-metric-desc">
+                                                    {row.failed > 0
+                                                        ? `${row.failed} pattern${row.failed !== 1 ? 's' : ''} rejected`
+                                                        : 'all passed'}
+                                                </span>
+                                            </div>
+                                        ))}
+                                    </div>
                                 </div>
                             )}
+
+                            {/* ━━ Cascade exhaustion ━━ */}
+                            {dir.cascadeInfo && dir.succeeded === 0 && (
+                                <div className="narrative-stage">
+                                    <div className="narrative-stage-body">
+                                        <div className="narr-metric-row fail">
+                                            <span className="narr-metric-icon">{'\u2717'}</span>
+                                            <span className="narr-metric-label">Cascade Exhausted</span>
+                                            <span className="narr-metric-ratio">{dir.cascadeInfo.count}</span>
+                                            <span className="narr-metric-desc">
+                                                All C/D/E/F candidate combinations tried without forming a valid pattern
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* ━━ Final result ━━ */}
+                            <div className={`narrative-result ${dir.succeeded > 0 ? 'found' : 'none'}`}>
+                                {dir.succeeded > 0
+                                    ? `\u2713 ${dir.succeeded} pattern${dir.succeeded !== 1 ? 's' : ''} confirmed`
+                                    : '\u2717 No pattern found'
+                                }
+                            </div>
                         </div>
                     ))}
 
-                    {/* No attempts at all for this bar */}
                     {narrativeSummary.length === 0 && (
                         <div className="log-empty" style={{ padding: '40px 20px' }}>
                             <div className="icon" style={{ fontSize: 20 }}>&#x25CB;</div>
@@ -393,8 +589,8 @@ export default function LogPanel({ detectionLog, hoveredBarIdx, isolationMode, c
                         </div>
                     )}
                 </div>
+
             ) : activeBarIdx != null ? (
-                /* Bar active but no attempts found yet */
                 <div className="narrative-summary" ref={scrollRef}>
                     <div className="log-empty" style={{ padding: '40px 20px' }}>
                         <div className="icon" style={{ fontSize: 20 }}>{'\u25CB'}</div>
@@ -416,7 +612,6 @@ export default function LogPanel({ detectionLog, hoveredBarIdx, isolationMode, c
                                 />
                         ))
                     ) : hasAnyData && !detectionLog?.length ? (
-                        /* Streaming mode — candle_logs loaded but no detection_log */
                         <div className="log-empty" style={{ padding: '40px 20px' }}>
                             <div className="icon" style={{ fontSize: 20 }}>{'\u25C8'}</div>
                             <p>
@@ -487,15 +682,20 @@ function LogRow({ entry, isExpanded, onToggle }) {
                             {s.value != null && typeof s.value === 'number' && (
                                 <span className="log-step-val">{s.value.toFixed(4)}</span>
                             )}
-                            {!s.passed && s.value != null && typeof s.value === 'number'
-                                && s.threshold_min != null && s.threshold_max != null && (
+                            {s.value != null && typeof s.value === 'number'
+                                && s.threshold_min != null && s.threshold_max != null
+                                && (s.threshold_min !== 0 || s.threshold_max !== 0) && (
                                 <span className="log-step-range">
                                     [{s.threshold_min.toFixed(3)},{s.threshold_max.toFixed(3)}]
-                                    {' '}
-                                    {s.value < s.threshold_min
-                                        ? `\u2193${(s.threshold_min - s.value).toFixed(4)}`
-                                        : `\u2191${(s.value - s.threshold_max).toFixed(4)}`
-                                    }
+                                    {!s.passed && (
+                                        <>
+                                            {' '}
+                                            {s.value < s.threshold_min
+                                                ? `\u2193${(s.threshold_min - s.value).toFixed(4)}`
+                                                : `\u2191${(s.value - s.threshold_max).toFixed(4)}`
+                                            }
+                                        </>
+                                    )}
                                 </span>
                             )}
                             {!s.passed && s.detail && s.value == null && (

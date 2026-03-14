@@ -634,10 +634,23 @@ class PatternDetector:
 
         # -- C, D, E, F cascading search --
         c_is_low = b_price > a_price
-        c_cands = C.get_c_candidates(
+        _ci = collect_traces  # shorthand for collect_info flag
+        c_result = C.get_c_candidates(
             wave, bars_x_b, xb_slope, a_slope, c_is_low,
             cfg, self._high, self._low, diag,
+            collect_info=_ci,
         )
+        if _ci:
+            c_cands, c_info = c_result
+        else:
+            c_cands, c_info = c_result, None
+
+        if attempt:
+            if attempt.candidate_info is None:
+                attempt.candidate_info = {}
+            if c_info:
+                attempt.candidate_info["C"] = c_info
+
         if not c_cands:
             if attempt:
                 attempt.reject("C_SEARCH", "No valid C candidates found")
@@ -646,6 +659,11 @@ class PatternDetector:
 
         if attempt:
             attempt.add_step("C_SEARCH", True, f"Found {len(c_cands)} C candidates")
+
+        # Track best D/E/F info across all candidates for the narrative
+        best_d_info = None
+        best_e_info = None
+        best_f_info = None
 
         for c_idx_val, c_price_val in c_cands:
             wave.c_idx = c_idx_val
@@ -659,10 +677,18 @@ class PatternDetector:
                 continue
 
             d_is_low = c_price_val > b_price
-            d_cands = C.get_d_candidates(
+            d_result = C.get_d_candidates(
                 wave, bars_x_b, xb_slope, d_is_low,
                 cfg, self._high, self._low, diag,
+                collect_info=_ci,
             )
+            if _ci:
+                d_cands, d_info = d_result
+                if d_info and (best_d_info is None or d_info["valid_count"] > best_d_info["valid_count"]):
+                    best_d_info = d_info
+            else:
+                d_cands, d_info = d_result, None
+
             if not d_cands:
                 continue
 
@@ -679,14 +705,24 @@ class PatternDetector:
                                 "POINTS",  True,
                                 f"C=bar{c_idx_val}({c_price_val:.5f}) D=bar{d_idx_val}({d_price_val:.5f})",
                             )
+                            if best_d_info:
+                                attempt.candidate_info["D"] = best_d_info
                         return result, attempt
                     continue
 
                 e_is_low = d_price_val > c_price_val
-                e_cands = C.get_e_candidates(
+                e_result = C.get_e_candidates(
                     wave, bars_x_b, a_slope, e_is_low,
                     cfg, self._high, self._low, diag,
+                    collect_info=_ci,
                 )
+                if _ci:
+                    e_cands, e_info = e_result
+                    if e_info and (best_e_info is None or e_info["valid_count"] > best_e_info["valid_count"]):
+                        best_e_info = e_info
+                else:
+                    e_cands, e_info = e_result, None
+
                 if not e_cands:
                     continue
 
@@ -702,10 +738,18 @@ class PatternDetector:
                         continue
 
                     f_is_low = e_price_val > d_price_val
-                    f_cands = C.get_f_candidates(
+                    f_result = C.get_f_candidates(
                         wave, bars_x_b, xb_slope, f_is_low,
                         cfg, self._high, self._low, diag,
+                        collect_info=_ci,
                     )
+                    if _ci:
+                        f_cands, f_info = f_result
+                        if f_info and (best_f_info is None or f_info["valid_count"] > best_f_info["valid_count"]):
+                            best_f_info = f_info
+                    else:
+                        f_cands, f_info = f_result, None
+
                     if not f_cands:
                         continue
 
@@ -716,6 +760,15 @@ class PatternDetector:
                         result = self._finalize(wave, PatternType.XABCDEF, channel_type, cfg, diag, last_drawn_idx, attempt)
                         if result is not None:
                             return result, attempt
+
+        # Store best candidate info for D/E/F (even on failure — useful for narrative)
+        if attempt and attempt.candidate_info is not None:
+            if best_d_info:
+                attempt.candidate_info["D"] = best_d_info
+            if best_e_info:
+                attempt.candidate_info["E"] = best_e_info
+            if best_f_info:
+                attempt.candidate_info["F"] = best_f_info
 
         # If we exhausted all candidates without success, note it
         if attempt and not attempt.succeeded:

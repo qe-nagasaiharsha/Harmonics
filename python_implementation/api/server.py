@@ -333,9 +333,9 @@ def _serialize_attempts(attempts, max_detailed=10):
 
 
 def _compact_attempt(a) -> dict:
-    """Compact attempt dict for streaming — keeps only what the narrative
-    summary needs (step_reached, direction, and the failing step's numbers).
-    Omits partial_wave, rejected_at, and passing steps to save ~80% payload.
+    """Compact attempt dict for streaming — includes ALL steps (pass and fail)
+    so the narrative summary can show every metric with its actual value.
+    Omits partial_wave, rejected_at, and verbose detail strings.
     """
     entry = {
         "x_idx": a.x_idx,
@@ -344,25 +344,15 @@ def _compact_attempt(a) -> dict:
         "b_price": a.b_price,
         "step_reached": a.step_reached,
         "succeeded": a.succeeded,
-        "steps": [],
-    }
-    # Include only the failing step (or all steps for successes)
-    if a.succeeded:
-        entry["steps"] = [
+        "steps": [
             {"step": s.step, "passed": s.passed, "value": s.value,
              "threshold_min": s.threshold_min, "threshold_max": s.threshold_max}
             for s in a.steps
-        ]
-    else:
-        for s in a.steps:
-            if not s.passed:
-                entry["steps"] = [{
-                    "step": s.step, "passed": False,
-                    "detail": s.detail, "value": s.value,
-                    "threshold_min": s.threshold_min,
-                    "threshold_max": s.threshold_max,
-                }]
-                break
+        ],
+    }
+    # Include candidate_info if present (per-point search summaries)
+    if hasattr(a, 'candidate_info') and a.candidate_info:
+        entry["candidate_info"] = a.candidate_info
     return entry
 
 

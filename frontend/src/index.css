@@ -748,7 +748,7 @@ code, .mono { font-family: var(--font-mono); }
 .narrative-stage-count {
   font-size: 10px;
   font-family: var(--font-mono);
-  color: var(--accent-red);
+  color: var(--text-muted);
   font-weight: 600;
 }
 
@@ -756,20 +756,149 @@ code, .mono { font-family: var(--font-mono); }
   padding-left: 2px;
 }
 
-.narrative-explanation {
-  font-size: 11px;
-  line-height: 1.6;
-  color: var(--text-secondary);
-  margin: 0 0 2px 0;
+/* ── Metric rows (B-stage checks, filter steps) ── */
+.narr-metric-row {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  font-size: 10.5px;
+  line-height: 1.7;
+  padding: 1px 0;
+}
+.narr-metric-icon {
+  width: 12px;
+  flex-shrink: 0;
+  text-align: center;
+  font-size: 10px;
+}
+.narr-metric-row.pass .narr-metric-icon { color: var(--accent-green); }
+.narr-metric-row.fail .narr-metric-icon { color: var(--accent-red); }
+
+.narr-metric-label {
+  font-weight: 600;
+  color: var(--text-primary);
+  min-width: 110px;
+  flex-shrink: 0;
+  font-size: 10px;
+}
+.narr-metric-ratio {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  min-width: 36px;
+  text-align: right;
+  flex-shrink: 0;
+}
+.narr-metric-row.pass .narr-metric-ratio { color: var(--accent-green); }
+.narr-metric-row.fail .narr-metric-ratio { color: var(--accent-red); }
+
+.narr-metric-desc {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.narrative-progressed {
+/* ── Candidate scan line ── */
+.narr-scan-line {
   font-size: 10px;
-  color: var(--accent-amber);
+  color: var(--text-muted);
+  margin: 2px 0 6px 0;
+}
+
+/* ── Candidate funnel visualization ── */
+.narr-funnel {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin: 4px 0 8px 0;
+  flex-wrap: wrap;
+}
+.narr-funnel-step {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-family: var(--font-mono);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+}
+.narr-funnel-step.active {
+  border-color: var(--accent-cyan);
+  background: rgba(34, 211, 238, 0.06);
+}
+.narr-funnel-step.empty {
+  opacity: 0.4;
+}
+.narr-funnel-step.result.active {
+  border-color: var(--accent-green);
+  background: rgba(34, 197, 94, 0.08);
+}
+.narr-funnel-count {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.narr-funnel-label {
+  color: var(--text-muted);
+  font-size: 8.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.narr-funnel-step + .narr-funnel-step::before {
+  content: '\u25B8';
+  color: var(--text-muted);
+  font-size: 8px;
+  margin-right: 2px;
+  margin-left: -2px;
+}
+
+/* ── Best rejected candidate ── */
+.narr-best-rejected {
+  margin: 4px 0 0 0;
+  padding: 6px 8px;
+  background: rgba(239, 68, 68, 0.04);
+  border: 1px solid rgba(239, 68, 68, 0.12);
+  border-radius: var(--radius-sm);
+}
+.narr-best-rej-header {
+  font-size: 10px;
   font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.narr-best-rej-score {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--accent-amber);
+  font-weight: 700;
+  margin-left: auto;
+}
+.narr-best-rej-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.narr-rej-check {
+  font-size: 9.5px;
+  font-family: var(--font-mono);
+}
+.narr-rej-check.pass { color: var(--accent-green); }
+.narr-rej-check.fail { color: var(--accent-red); font-weight: 700; }
+.narr-rej-check.skip { color: var(--text-muted); opacity: 0.5; }
+
+.narr-rej-detail {
+  font-size: 9.5px;
+  color: var(--text-muted);
   margin: 4px 0 0 0;
 }
 
+/* ── Result badge ── */
 .narrative-result {
   margin-top: 8px;
   font-size: 10px;
@@ -784,7 +913,7 @@ code, .mono { font-family: var(--font-mono); }
   background: var(--fail-bg);
   border: 1px solid var(--fail-border);
 }
-.narrative-result.success {
+.narrative-result.found {
   color: var(--accent-green);
   background: var(--pass-bg);
   border: 1px solid var(--pass-border);

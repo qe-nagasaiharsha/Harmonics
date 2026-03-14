@@ -242,6 +242,9 @@ class XAttemptLog:
     # Partial wave snapshot — captures whatever points were found before
     # rejection so the UI can draw incomplete pattern traces on the chart.
     partial_wave: Optional[dict] = None
+    # Per-point candidate search summaries (C, D, E, F) with funnel stats
+    # and best-rejected candidate details for the narrative summary.
+    candidate_info: Optional[dict] = None
 
     def add_step(self, step: str, passed: bool, detail: str,
                  value: float = 0.0,
