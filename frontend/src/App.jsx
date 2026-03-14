@@ -81,10 +81,7 @@ export default function App() {
 
   const [hoveredBarIdx, setHoveredBarIdx] = useState(null)
   const hoverRafRef = useRef(null)
-
-  // ---- Lazy trace loading (for large runs > 2000 bars) ----
-  const [lazyTraceCache, setLazyTraceCache] = useState({})  // { [barIdx]: attempts[] }
-  const lazyFetchingRef = useRef(new Set())  // bars currently being fetched
+  const abortRef = useRef(null)  // AbortController for progressive detection
 
   // ---- Isolation mode (right-click → X>B / X<B) ----
   const [isolationMode, setIsolationMode] = useState(null)   // { xIdx, xIsLow } | null
@@ -137,31 +134,118 @@ export default function App() {
       setStatus({ type: 'error', text: 'Please upload a data file first.' })
       return
     }
+
+    // Abort any previous in-flight detection
+    if (abortRef.current) abortRef.current.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+
     setLoading(true)
     setDetectionResult(null)
     setSelectedPattern(null)
     setIsolationMode(null)
-    setLazyTraceCache({})
-    lazyFetchingRef.current.clear()
-    setStatus({ type: 'running', text: 'Running detection…' })
+    setStatus({ type: 'running', text: 'Starting detection\u2026' })
     const t0 = performance.now()
+
+    let totalPatterns = 0
+    let totalBull = 0
+    let totalBear = 0
+    let barsLoaded = 0
+
     try {
-      const resp = await axios.post('/api/detect', { data_path: dataPath, max_bars: maxBars, config }, { timeout: 300000 })
-      const dt = ((performance.now() - t0) / 1000).toFixed(1)
-      const d = resp.data
-      setDetectionResult(d)
-      const bull = d.patterns.filter(p => p.is_bullish).length
-      const bear = d.patterns.length - bull
-      setStatus({
-        type: 'ok',
-        text: `Found ${d.patterns_found} patterns (${bull}↑ ${bear}↓) in ${d.bars_scanned} bars — ${dt}s`,
-        bull, bear, patterns: d.patterns_found, bars: d.bars_scanned,
+      const response = await fetch('/api/detect_stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data_path: dataPath, max_bars: maxBars, config }),
+        signal: controller.signal,
       })
+
+      if (!response.ok) {
+        let detail = `HTTP ${response.status}`
+        try { const err = await response.json(); detail = err.detail || detail } catch {}
+        throw new Error(detail)
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+
+        // Parse complete NDJSON lines
+        let nlIdx
+        while ((nlIdx = buffer.indexOf('\n')) !== -1) {
+          const line = buffer.slice(0, nlIdx).trim()
+          buffer = buffer.slice(nlIdx + 1)
+          if (!line) continue
+
+          const chunk = JSON.parse(line)
+
+          // Handle streaming error
+          if (chunk.error) throw new Error(chunk.error)
+
+          // Count new patterns in this chunk
+          const newBull = chunk.patterns.filter(p => p.is_bullish).length
+          const newBear = chunk.patterns.length - newBull
+          totalPatterns += chunk.patterns.length
+          totalBull += newBull
+          totalBear += newBear
+
+          if (chunk.candles) {
+            // First chunk — initialise the result with OHLC + first batch
+            barsLoaded = chunk.bars_loaded
+            setDetectionResult({
+              total_bars_in_file: chunk.total_bars_in_file,
+              bars_scanned: barsLoaded,
+              candles: chunk.candles,
+              patterns: chunk.patterns,
+              patterns_found: totalPatterns,
+              candle_logs: chunk.candle_logs,
+              detection_log: [],  // streaming doesn't include detection_log
+            })
+          } else {
+            // Subsequent chunks — merge incrementally
+            setDetectionResult(prev => {
+              if (!prev) return prev
+              return {
+                ...prev,
+                patterns: [...prev.patterns, ...chunk.patterns],
+                candle_logs: { ...prev.candle_logs, ...chunk.candle_logs },
+                patterns_found: totalPatterns,
+              }
+            })
+          }
+
+          // Update progress / final status
+          if (chunk.done) {
+            const dt = ((performance.now() - t0) / 1000).toFixed(1)
+            setStatus({
+              type: 'ok',
+              text: `Found ${totalPatterns} patterns (${totalBull}\u2191 ${totalBear}\u2193) in ${barsLoaded} bars \u2014 ${dt}s`,
+              bull: totalBull, bear: totalBear,
+              patterns: totalPatterns, bars: barsLoaded,
+            })
+          } else {
+            const pct = chunk.total_bars > 0
+              ? Math.round(chunk.bars_scanned / chunk.total_bars * 100)
+              : 0
+            setStatus({
+              type: 'running',
+              text: `Detecting\u2026 ${pct}% \u2014 ${totalPatterns} patterns found`,
+            })
+          }
+        }
+      }
     } catch (e) {
-      const msg = e.response?.data?.detail || e.message
-      setStatus({ type: 'error', text: `Error: ${msg}` })
+      if (e.name === 'AbortError') return  // user started a new detection
+      setStatus({ type: 'error', text: `Error: ${e.message}` })
     } finally {
       setLoading(false)
+      abortRef.current = null
     }
   }, [dataPath, maxBars, config])
 
@@ -185,35 +269,7 @@ export default function App() {
 
   const handleExitIsolation = useCallback(() => setIsolationMode(null), [])
 
-  const isLazyMode = detectionResult?.lazy_traces === true
-  const candle_logs_raw = detectionResult?.candle_logs ?? {}
-
-  // Merge lazy-loaded traces into candle_logs
-  const candle_logs = useMemo(() => {
-    if (!isLazyMode) return candle_logs_raw
-    return { ...candle_logs_raw, ...lazyTraceCache }
-  }, [candle_logs_raw, lazyTraceCache, isLazyMode])
-
-  // Lazy-fetch traces when hovering in lazy mode
-  const activeBarForTrace = isolationMode ? isolationMode.xIdx : hoveredBarIdx
-  useEffect(() => {
-    if (!isLazyMode || activeBarForTrace == null) return
-    const key = String(activeBarForTrace)
-    // Already have data or already fetching
-    if (candle_logs[key] || lazyFetchingRef.current.has(key)) return
-
-    lazyFetchingRef.current.add(key)
-    axios.post('/api/trace_bar', { x_idx: activeBarForTrace }, { timeout: 30000 })
-      .then(r => {
-        setLazyTraceCache(prev => ({ ...prev, [key]: r.data.attempts }))
-      })
-      .catch(() => {
-        // Silently fail — summary will show "no attempts"
-      })
-      .finally(() => {
-        lazyFetchingRef.current.delete(key)
-      })
-  }, [isLazyMode, activeBarForTrace, candle_logs])
+  const candle_logs = detectionResult?.candle_logs ?? {}
 
   // Client-side direction filter
   const displayedResult = useMemo(() => {
@@ -289,7 +345,6 @@ export default function App() {
           hoveredBarIdx={hoveredBarIdx}
           isolationMode={isolationMode}
           candleLogs={candle_logs}
-          lazyMode={isLazyMode}
         />
       </div>
 

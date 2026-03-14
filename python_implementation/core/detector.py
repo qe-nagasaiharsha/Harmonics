@@ -163,29 +163,96 @@ class PatternDetector:
             return results, traces, detection_log
         return results
 
-    def trace_single_bar(
+    def find_all_progressive(
         self,
-        x_idx: int,
         cfg: DetectorConfig,
-    ) -> List[XAttemptLog]:
-        """Run detection for a single X bar with full tracing.
+        chunk_size: int = 500,
+    ):
+        """Generator: yield detection results in chunks for progressive loading.
 
-        Used for lazy trace loading — the main detection can skip traces for
-        performance, then this fetches detailed traces on-demand when the user
-        hovers a specific bar.
+        Always collects traces (``collect_traces=True``) so that every chunk
+        carries full per-candle diagnostic data for the narrative summary.
+
+        Yields ``dict`` with keys:
+          - ``patterns``: ``List[PatternResult]``
+          - ``traces``: ``Dict[int, List[XAttemptLog]]``
+          - ``detection_log``: ``list``
+          - ``bars_scanned``: ``int`` (cumulative X positions processed)
+          - ``total_bars``: ``int`` (total X positions to process)
+          - ``done``: ``bool``
         """
-        all_attempts: List[XAttemptLog] = []
-        for active_ct in cfg.channel_types_to_run():
-            _, attempts_low = self._try_from_x(
-                x_idx, True, active_ct, cfg, -9999, True,
-            )
-            all_attempts.extend(attempts_low)
+        search_start = self._total_bars
+        if cfg.max_search_bars > 0 and cfg.max_search_bars < self._total_bars:
+            search_start = cfg.max_search_bars
 
-            _, attempts_high = self._try_from_x(
-                x_idx, False, active_ct, cfg, -9999, True,
-            )
-            all_attempts.extend(attempts_high)
-        return all_attempts
+        end_idx = cfg.b_max + 10
+        channel_types = cfg.channel_types_to_run()
+        scan_range = max(search_start - end_idx, 0)
+        total_to_scan = scan_range * len(channel_types)
+
+        chunk_patterns: List[PatternResult] = []
+        chunk_traces: Dict[int, List[XAttemptLog]] = {}
+        chunk_log: list = []
+        bars_in_chunk = 0
+        total_scanned = 0
+
+        for active_ct in channel_types:
+            chunk_log.append({
+                'type': 'channel',
+                'channel': active_ct.value,
+            })
+
+            last_drawn_idx = -9999
+
+            for x_idx in range(search_start, end_idx, -1):
+                # Try X as LOW
+                pat, attempts = self._try_from_x(
+                    x_idx, True, active_ct, cfg, last_drawn_idx, True,
+                )
+                if attempts:
+                    chunk_traces.setdefault(x_idx, []).extend(attempts)
+                    self._log_attempts(chunk_log, attempts, active_ct.value)
+                if pat is not None:
+                    chunk_patterns.append(pat)
+                    last_drawn_idx = pat.wave.last_point(pat.pattern_type)[0]
+
+                # Try X as HIGH
+                pat, attempts = self._try_from_x(
+                    x_idx, False, active_ct, cfg, last_drawn_idx, True,
+                )
+                if attempts:
+                    chunk_traces.setdefault(x_idx, []).extend(attempts)
+                    self._log_attempts(chunk_log, attempts, active_ct.value)
+                if pat is not None:
+                    chunk_patterns.append(pat)
+                    last_drawn_idx = pat.wave.last_point(pat.pattern_type)[0]
+
+                bars_in_chunk += 1
+                total_scanned += 1
+
+                if bars_in_chunk >= chunk_size:
+                    yield {
+                        'patterns': chunk_patterns,
+                        'traces': chunk_traces,
+                        'detection_log': chunk_log,
+                        'bars_scanned': total_scanned,
+                        'total_bars': total_to_scan,
+                        'done': False,
+                    }
+                    chunk_patterns = []
+                    chunk_traces = {}
+                    chunk_log = []
+                    bars_in_chunk = 0
+
+        # Final yield (always emitted, signals completion)
+        yield {
+            'patterns': chunk_patterns,
+            'traces': chunk_traces,
+            'detection_log': chunk_log,
+            'bars_scanned': total_scanned,
+            'total_bars': total_to_scan,
+            'done': True,
+        }
 
     @staticmethod
     def _log_attempts(log: list, attempts: list, channel: str) -> None:

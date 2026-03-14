@@ -168,7 +168,7 @@ function buildDirectionSummary(attempts) {
 // ─────────────────────────────────────────────────────────────────────────────
 // LogPanel Component
 // ─────────────────────────────────────────────────────────────────────────────
-export default function LogPanel({ detectionLog, hoveredBarIdx, isolationMode, candleLogs, lazyMode }) {
+export default function LogPanel({ detectionLog, hoveredBarIdx, isolationMode, candleLogs }) {
     const [filter, setFilter] = useState('all')
     const [searchBar, setSearchBar] = useState('')
     const [expandedRows, setExpandedRows] = useState(new Set())
@@ -256,8 +256,11 @@ export default function LogPanel({ detectionLog, hoveredBarIdx, isolationMode, c
         })
     }, [])
 
+    // Track whether we have any data at all (streaming sends candle_logs but not detection_log)
+    const hasAnyData = (detectionLog?.length > 0) || (candleLogs && Object.keys(candleLogs).length > 0)
+
     // ── Empty state ──
-    if (!detectionLog?.length) {
+    if (!hasAnyData) {
         return (
             <aside className="log-panel">
                 <div className="panel-header">Detection Log</div>
@@ -391,16 +394,11 @@ export default function LogPanel({ detectionLog, hoveredBarIdx, isolationMode, c
                     )}
                 </div>
             ) : activeBarIdx != null ? (
-                /* Bar active but no attempts found — may be lazy loading */
+                /* Bar active but no attempts found yet */
                 <div className="narrative-summary" ref={scrollRef}>
                     <div className="log-empty" style={{ padding: '40px 20px' }}>
-                        <div className="icon" style={{ fontSize: 20 }}>
-                            {lazyMode ? '\u23F3' : '\u25CB'}
-                        </div>
-                        <p>{lazyMode
-                            ? 'Loading trace for this bar…'
-                            : 'No detection attempts used this bar as X point'
-                        }</p>
+                        <div className="icon" style={{ fontSize: 20 }}>{'\u25CB'}</div>
+                        <p>No detection attempts used this bar as X point</p>
                     </div>
                 </div>
             ) : (
@@ -417,9 +415,20 @@ export default function LogPanel({ detectionLog, hoveredBarIdx, isolationMode, c
                                     onToggle={() => toggleRow(i)}
                                 />
                         ))
+                    ) : hasAnyData && !detectionLog?.length ? (
+                        /* Streaming mode — candle_logs loaded but no detection_log */
+                        <div className="log-empty" style={{ padding: '40px 20px' }}>
+                            <div className="icon" style={{ fontSize: 20 }}>{'\u25C8'}</div>
+                            <p>
+                                {Object.keys(candleLogs).length} bars analysed<br />
+                                <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>
+                                    Hover a candle or right-click to see detection analysis
+                                </span>
+                            </p>
+                        </div>
                     ) : (
                         <div className="log-empty" style={{ padding: '40px 20px' }}>
-                            <div className="icon" style={{ fontSize: 20 }}>&#x25CB;</div>
+                            <div className="icon" style={{ fontSize: 20 }}>{'\u25CB'}</div>
                             <p>No matching entries</p>
                         </div>
                     )}

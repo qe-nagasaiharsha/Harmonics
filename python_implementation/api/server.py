@@ -13,6 +13,7 @@ or:
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import tempfile
 import traceback
@@ -29,7 +30,7 @@ _DIST = _ROOT / "frontend" / "dist"
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.gzip import GZipMiddleware
@@ -162,20 +163,6 @@ class DetectRequest(BaseModel):
     config: ConfigInput = ConfigInput()
 
 
-class TraceBarRequest(BaseModel):
-    x_idx: int
-
-
-# Threshold: collect full traces only for ≤ this many bars.
-# Above this, traces are fetched lazily via /api/trace_bar.
-_TRACE_THRESHOLD = 2000
-
-# Cache for lazy trace loading (last detection run's data + config)
-_last_run_cache: dict = {
-    "data": None,
-    "cfg": None,
-    "detector": None,
-}
 
 
 # ===================================================================
@@ -345,6 +332,57 @@ def _serialize_attempts(attempts, max_detailed=10):
     return result
 
 
+def _compact_attempt(a) -> dict:
+    """Compact attempt dict for streaming — keeps only what the narrative
+    summary needs (step_reached, direction, and the failing step's numbers).
+    Omits partial_wave, rejected_at, and passing steps to save ~80% payload.
+    """
+    entry = {
+        "x_idx": a.x_idx,
+        "x_is_low": a.x_is_low,
+        "b_idx": a.b_idx,
+        "b_price": a.b_price,
+        "step_reached": a.step_reached,
+        "succeeded": a.succeeded,
+        "steps": [],
+    }
+    # Include only the failing step (or all steps for successes)
+    if a.succeeded:
+        entry["steps"] = [
+            {"step": s.step, "passed": s.passed, "value": s.value,
+             "threshold_min": s.threshold_min, "threshold_max": s.threshold_max}
+            for s in a.steps
+        ]
+    else:
+        for s in a.steps:
+            if not s.passed:
+                entry["steps"] = [{
+                    "step": s.step, "passed": False,
+                    "detail": s.detail, "value": s.value,
+                    "threshold_min": s.threshold_min,
+                    "threshold_max": s.threshold_max,
+                }]
+                break
+    return entry
+
+
+def _compact_serialize_bar(attempts, max_per_bar=40) -> list:
+    """Serialize a bar's attempts compactly, capping count for huge bars."""
+    if len(attempts) <= max_per_bar:
+        return [_compact_attempt(a) for a in attempts]
+    # Keep successes + sample of failures
+    successes = [a for a in attempts if a.succeeded]
+    failures = [a for a in attempts if not a.succeeded]
+    keep = max_per_bar - len(successes)
+    if keep > 0:
+        # Evenly sample failures
+        step = max(1, len(failures) // keep)
+        sampled = failures[::step][:keep]
+    else:
+        sampled = []
+    return [_compact_attempt(a) for a in successes + sampled]
+
+
 def _slice_data(data: CandleArray, n: int) -> CandleArray:
     """Slice to the n most-recent bars (index 0 = most recent)."""
     import numpy as np
@@ -468,26 +506,12 @@ async def detect(req: DetectRequest):
     except (KeyError, ValueError) as e:
         raise HTTPException(status_code=422, detail=f"Invalid config: {e}")
 
-    # Only collect traces for small runs — large runs use lazy loading
-    should_trace = len(data) <= _TRACE_THRESHOLD
-
     try:
         def _run_detection():
             detector = PatternDetector(data)
-            # Cache for lazy trace loading
-            _last_run_cache["data"] = data
-            _last_run_cache["cfg"] = cfg
-            _last_run_cache["detector"] = detector
-            if should_trace:
-                return detector.find_all(cfg, collect_traces=True)
-            else:
-                return detector.find_all(cfg, collect_traces=False), {}, []
+            return detector.find_all(cfg, collect_traces=True)
 
-        raw = await asyncio.to_thread(_run_detection)
-        if should_trace:
-            results, traces, detection_log = raw
-        else:
-            results, traces, detection_log = raw
+        results, traces, detection_log = await asyncio.to_thread(_run_detection)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Detection error: {traceback.format_exc()}")
 
@@ -550,36 +574,103 @@ async def detect(req: DetectRequest):
         "patterns": [_result_to_dict(r) for r in results],
         "candle_logs": candle_logs_out,
         "detection_log": detection_log_out,
-        "lazy_traces": not should_trace,  # frontend uses /api/trace_bar when True
     }
 
 
-@app.post("/api/trace_bar")
-async def trace_bar(req: TraceBarRequest):
-    """Lazy trace loading: run detection for a single X bar with full tracing.
+@app.post("/api/detect_stream")
+async def detect_stream(req: DetectRequest):
+    """Progressive detection with NDJSON streaming.
 
-    Used when the main detection skipped traces (> _TRACE_THRESHOLD bars).
-    Returns per-attempt logs for the specified bar so the frontend can
-    render the narrative summary on hover.
+    Processes detection in chunks of ~500 bars, streaming results as each
+    chunk completes.  The first line includes OHLC candle data so the chart
+    renders immediately.  Subsequent lines carry incremental patterns and
+    full per-candle trace data.
     """
-    detector = _last_run_cache.get("detector")
-    cfg = _last_run_cache.get("cfg")
-    if detector is None or cfg is None:
-        raise HTTPException(status_code=404, detail="No detection data cached. Run detection first.")
+    try:
+        raw_data = load_file(req.data_path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Data file not found: {req.data_path}")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to load data: {e}")
 
-    x_idx = req.x_idx
-    if x_idx < 0 or x_idx > detector._total_bars:
-        raise HTTPException(status_code=400, detail=f"x_idx {x_idx} out of range [0, {detector._total_bars}]")
+    total_bars_in_file = len(raw_data)
+    data = _slice_data(raw_data, req.max_bars)
 
     try:
-        attempts = await asyncio.to_thread(detector.trace_single_bar, x_idx, cfg)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Trace error: {e}")
+        cfg = _build_cfg(req.config)
+    except (KeyError, ValueError) as e:
+        raise HTTPException(status_code=422, detail=f"Invalid config: {e}")
 
-    return {
-        "x_idx": x_idx,
-        "attempts": [_attempt_to_dict(a) for a in attempts],
-    }
+    detector = PatternDetector(data)
+
+    # Pre-build OHLC candle list (sent with first chunk)
+    candles_out = [
+        {
+            "idx": i,
+            "time": float(data.timestamp[i]),
+            "open": float(data.open[i]),
+            "high": float(data.high[i]),
+            "low": float(data.low[i]),
+            "close": float(data.close[i]),
+            "volume": float(data.volume[i]),
+        }
+        for i in range(len(data))
+    ]
+
+    async def event_generator():
+        gen = detector.find_all_progressive(cfg, chunk_size=500)
+        is_first = True
+        patterns_found = 0
+
+        try:
+            while True:
+                chunk = await asyncio.to_thread(next, gen, None)
+                if chunk is None:
+                    break
+
+                # Compute golden lines for this chunk's patterns
+                for r in chunk['patterns']:
+                    try:
+                        r.golden_line = compute_golden_line(
+                            r.wave, r.pattern_type, cfg,
+                            data.high_at, data.low_at, data.close_at,
+                        )
+                    except Exception:
+                        pass
+
+                patterns_found += len(chunk['patterns'])
+
+                payload = {
+                    'patterns': [_result_to_dict(r) for r in chunk['patterns']],
+                    'candle_logs': {
+                        str(x_idx): _compact_serialize_bar(attempts)
+                        for x_idx, attempts in chunk['traces'].items()
+                    },
+                    'bars_scanned': chunk['bars_scanned'],
+                    'total_bars': chunk['total_bars'],
+                    'patterns_found': patterns_found,
+                    'done': chunk['done'],
+                }
+
+                if is_first:
+                    payload['candles'] = candles_out
+                    payload['total_bars_in_file'] = total_bars_in_file
+                    payload['bars_loaded'] = len(data)
+                    is_first = False
+
+                yield json.dumps(payload) + "\n"
+
+        except Exception as e:
+            yield json.dumps({'error': str(e), 'done': True}) + "\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ===================================================================
